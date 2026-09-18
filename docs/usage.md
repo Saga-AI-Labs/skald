@@ -121,6 +121,64 @@ python -m adapters.pi50 /media/data/coding/bdh-cl/docs/PHASE1-MANIFEST.md manife
 The instrument treats a nonzero exit as *measurement data* (manifest fresh vs
 stale), so a "0.0 / stale" verdict is a result, not a failure.
 
+#### pi50 abliteration / refusal tasks
+
+The same family also carries the Qwen ablit-vs-stock instrument
+(`vendor/pi50_eval/`), which judges whether a refusal-removal edit is *good*:
+collateral over-refusal precision, capability tax, and epistemic honesty. It is
+one family, not a new one — the store's `adapter`/`suite` dimensions stay
+comparable across everything Skald records.
+
+| task | reads | metrics it emits |
+|---|---|---|
+| `run_suite` | a live OpenAI-compatible server | nothing directly; writes transcripts and records collection health |
+| `score_refusal` | transcripts | `<block>.refusal_rate`, `.off_target_rate`, `.compliance_rate` |
+| `score_confab` | transcripts | `<battery>.fabrication_rate`, `.honesty_rate`, `.attempted_accuracy` |
+| `score_capability` | transcripts | `<suite>.accuracy`, `.attempted_accuracy`, `.empty_rate` |
+| `paired_compare` | two transcripts | `shared`, `disagreements`, `transitions:<A->B>`, `per_class:<bucket>:<A->B>` |
+
+```bash
+# collect (arm identity is corroborated by the server, never inferred from a filename)
+python -m adapters.pi50 /models/qwen3.8-flash-next-stock run_suite \
+  --config '{"suites": ["xstest"], "arm": "stock", "require_model": "qwen3.8-flash-next-stock", "protocol": "v1"}'
+
+# score the four axes from transcripts already on disk
+python -m adapters.pi50 /models/qwen3.8-flash-next-stock score_refusal \
+  --config '{"suites": ["xstest", "jbb"], "arm": "stock", "protocol": "v1"}'
+python -m adapters.pi50 /models/qwen3.8-flash-next-stock score_confab \
+  --config '{"files": ["ablit_ccb.jsonl", "ablit_fpb.jsonl"], "protocol": "v1"}'
+python -m adapters.pi50 /models/qwen3.8-flash-next-stock score_capability \
+  --config '{"suites": ["mmlu_c1024", "gsm8k"], "arm": "stock", "protocol": "v1"}'
+
+# the two-arm flip table, including the REFUSED->OFF_TARGET sites
+python -m adapters.pi50 /models/qwen3.8-flash-next-stock paired_compare \
+  --config '{"pair_a": "stock_xstest.jsonl", "pair_b": "ablit_xstest.jsonl", "protocol": "v1"}'
+```
+
+Config keys: `python` (default `sys.executable`), `base_url`/`model` (exported
+to the tool as `FN_BASE`/`FN_MODEL`), `transcript_dir`, `data_dir`, `arm`,
+`suites`, `files`, `pair_a`, `pair_b`, `workers`, `max_tokens`, `timeout`,
+`require_model`, `protocol` (**required** — it is the join key), `repo`.
+
+Four guards are deliberate, because a half-failed collection otherwise produces
+plausible-looking aggregates:
+
+- `run_suite` **requires** `require_model` and aborts if fewer than 98 % of
+  items were answered — a 404 storm against a swapped checkpoint looks exactly
+  like a model that stopped refusing.
+- `paired_compare` accepts the tool's `rc=1` **only** when the `--json` was
+  written: that code means "pairing warnings", which is a measurement.
+- Intervals are cluster-aware bootstrap where the suite clusters, Wilson
+  otherwise, and the choice is recorded in `protocol` — a per-item interval on
+  a cluster-sampled suite would be pseudo-replication.
+- Rates are stored as **proportions**, matching `saga.py`, so one query can
+  compare across adapters.
+
+Transcripts are model outputs and stay on disk; only aggregate records enter
+the store. See `docs/2026-09-14_ablit-eval-suite.md` for the full manual and
+`docs/plans/2026-09-14_abliteration-eval-plan.md` for the pre-registered
+thresholds.
+
 ### saga — general-purpose suites (`python -m adapters.saga`)
 
 Runs the saga evaluation machinery over a local model:

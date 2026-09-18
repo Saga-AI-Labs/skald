@@ -12,6 +12,28 @@ applicable); this file is the index.
 | `vendor/jlens/` | Jacobian-Lens library (`jlens` package) | **Anthropic PBC** (copyright headers), via Johnny Lin's **Neuronpedia** (`github.com/hijohnnylin/neuronpedia`); background paper "Verbalizable Representations Form a Global Workspace in Language Models" (Gurnee et al., 2026) | Apache-2.0 (`vendor/jlens/LICENSE`) |
 | `vendor/bdh_cl/` | BDH-CL eval scripts (`eval_router`, `domain_eval`, `p5_inchain_check`), Pi-50 manifest instrument, `pipeline/` + `bdh.py` import closure | **Pathway Technology, Inc.** (© 2025, research fork of `pathwaycom/bdh` — *The Dragon Hatchling*, Kosowski et al.) | MIT-style (`vendor/bdh_cl/LICENSE.md`) |
 | `vendor/saga_benchmarks/` | Saga general-purpose benchmarks (`run_mmlu`, `run_gsm8k`, `run_bbq`, `BenchmarkResult`), model loader, eval config | **Saga AI Labs** (Saga "Mixture of Agents" repo; previously unlicensed — AGPL-3.0 `LICENSE` placed at its root during this consolidation) | **AGPL-3.0** (`vendor/saga_benchmarks/LICENSE`) |
+| `vendor/pi50_eval/` | Abliteration/refusal instrument: 7 stdlib scorers + 19 public prompt suites (12,927 items). **Mixed authorship** — see the note below the table | **harness:** pi-50 (this project's own instrument, same as `adapters/pi50.py`). **data:** third-party public research suites — `XSTest` (Qi et al.), `JailbreakBench`, `HEx-PHI`, `AdvBench`, `SORRY-Bench`/`-2`, `OR-Bench`, `MMLU` (`cais/mmlu`), `GSM8K`, plus two locally authored batteries (`custom_ccb`, `custom_fpb`) | **none captured** — see the note below the table |
+
+### The `vendor/pi50_eval/` entry, stated plainly
+
+This directory is unlike the other three, and two of rule 2's requirements are
+only partly met for it. Rather than paper over that:
+
+- **The harness is not borrowed.** `harness/*.py` is pi-50's own instrument — the
+  same authorship as `adapters/pi50.py` — so it carries no third-party license and
+  no upstream to pin. It is vendored (rather than left only in the adapter) so the
+  scorers stay byte-checkable and runnable from a fresh clone, per rule 4.
+- **The data is borrowed, and its licenses were never captured.** The 19 `data/*.jsonl`
+  suites are third-party research releases. `fetch_datasets.py` recorded
+  repo/config/split/file/count/label-source but **not** license, so there is no
+  `LICENSE` file to place here and none should be inferred. The upstream repos are the
+  authority; `vendor/pi50_eval/PIN.md` lists each suite with its recorded origin and
+  flags the entries whose origin is a since-deleted temp file. Treat this as an open
+  compliance item, not a settled one.
+- **Pinned by content, not by commit.** The source `eval/` directory is not
+  git-tracked, so no upstream commit exists to name; each file is pinned by SHA-256.
+- **One file is a derivative, not an independent sample:** `advbench_safe.jsonl` is
+  `advbench.jsonl` with its `expected_safe` column relabelled. Do not average the two.
 
 ## Combined-work license notice
 

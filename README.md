@@ -98,5 +98,13 @@ license and a `PIN.md` provenance record. Full index: [`CREDITS.md`](CREDITS.md)
   `LICENSE` placed at its root during this consolidation). Pinned at commit
   `5657fce`, **AGPL-3.0** — see `CREDITS.md`: the combined work that
   executes this directory is AGPL-covered.
+- **Abliteration/refusal instrument** (`vendor/pi50_eval/`, via
+  `adapters/pi50.py`): mixed authorship. The 7 stdlib scorers are **pi-50's
+  own** (same author as the adapter), pinned by content digest because the
+  source `eval/` tree is not git-tracked; the 19 prompt suites (12,927 items)
+  are **third-party public research releases** whose licenses were never
+  captured at fetch time — `CREDITS.md` states this plainly rather than
+  implying a license, and `vendor/pi50_eval/PIN.md` carries the per-suite
+  provenance and the known gaps.
 
 Everything else in this repository is Skald's own code, Apache-2.0.
