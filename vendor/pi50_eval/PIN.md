@@ -131,6 +131,15 @@ obtained. No credit line can cure that; only removal can. To run the hexphi
 arm, fetch it yourself under your own approved access
 (`harness/fetch_datasets.py` knows the source) — do not re-commit the file.
 
+Do not "restore" this from the MIT-licensed code repo:
+`LLM-Tuning-Safety/LLMs-Finetuning-Safety` on GitHub (MIT) holds the paper's
+code and demo data, but **not** the `category_*.csv` benchmark — that lives
+only in the gated `LLM-Tuning-Safety/HEx-PHI` HF dataset, which is a separate
+object under separate terms. The vendored rows were fetched from the gated
+dataset (see `manifest.json`: `category_1/3/4/5/6/7/8/9/10/11.csv`, terms
+accepted 2026-09-14 for local eval use), so the MIT code-repo license never
+covered them. Lawful access is not a redistribution right.
+
 ## Known provenance gaps (stated, not papered over)
 
 These are real weaknesses in the record, found while vendoring. Do not treat
