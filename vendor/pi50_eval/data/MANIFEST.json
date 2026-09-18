@@ -49,16 +49,6 @@
   "repo": "openai/gsm8k",
   "sha256": "d2cea8e5fcdf74d73206954ffeab453acabacb5775e5cff26582e3bee7ac77a8"
  },
- "hexphi": {
-  "count_matches": true,
-  "declared_in_manifest": 300,
-  "fetched_utc": "2026-09-14T19:52:47Z",
-  "file": "data/hexphi.jsonl",
-  "has_note": true,
-  "items": 300,
-  "repo": "LLM-Tuning-Safety/HEx-PHI",
-  "sha256": "1045ecfc19931bcec4017791a588ce06492dacca1f39f3b3af079ac33c6586bb"
- },
  "jbb": {
   "count_matches": true,
   "declared_in_manifest": 200,

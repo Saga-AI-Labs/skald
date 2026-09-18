@@ -16,10 +16,12 @@ they are somebody else's code. They are stdlib-only (`urllib`, no `numpy`,
 no `requests`, no `torch`), so any Python >= 3.11 runs them.
 
 **2. The suite data (`data/`) — third-party published benchmarks.**
-The 19 `.jsonl` suites are other people's published research datasets
-(XSTest, JBB, HEx-PHI, AdvBench, SORRY-Bench, OR-Bench, StrongREJECT,
+The 18 `.jsonl` suites are other people's published research datasets
+(XSTest, JBB, AdvBench, SORRY-Bench, OR-Bench, StrongREJECT,
 GSM8K, MMLU, SimpleQA) plus two batteries pi-50 built (`custom_ccb`,
-`custom_fpb`). Their authoritative provenance record is
+`custom_fpb`). A 19th, HEx-PHI, was removed in the 2026-09-19 license
+sweep (see below) — its gated terms forbid redistribution. Their
+authoritative provenance record is
 [`data/manifest.json`](data/manifest.json), copied verbatim from the source
 project; it carries per suite the upstream `repo`/`origin`, the fetched
 `config`/`split`/`rows`, the label-source (`forced_expected_safe`), the
@@ -84,33 +86,50 @@ suite, including the corrections it forced (e.g. StrongREJECT measured 313
 rows, not the 310 the paper writes down). `make_custom.py` built the two
 pi-50 batteries with resolver-verified identifiers.
 
-### `data/` (19 suites + two manifests)
+### `data/` (18 suites + two manifests)
 
 `data/MANIFEST.json` is generated, not hand-written: per suite the item count
 counted from the file, its SHA-256, the count `manifest.json` declares, and
-whether the two agree. All 19 agree; total **12,927 items**.
+whether the two agree. All 18 agree; total **12,627 items**. (19 suites /
+12,927 before the HEx-PHI removal documented below.)
 
-| suite | items | sha256 | upstream |
-|---|---|---|---|
-| `advbench` | 520 | `236dfea57f22b849…` | `walledai/AdvBench` |
-| `advbench_safe` | 416 | `9d65cec70609f121…` | `AmberYifan/AdvBench_safe` |
-| `custom_ccb` | 18 | `65dbd677c3f0fd67…` | `harness/make_custom.py` (pi-50) |
-| `custom_fpb` | 8 | `3d92924806b76877…` | `harness/make_custom.py` (pi-50) |
-| `gsm8k` | 1,319 | `d2cea8e5fcdf74d7…` | `openai/gsm8k` |
-| `hexphi` | 300 | `1045ecfc19931bce…` | `LLM-Tuning-Safety/HEx-PHI` |
-| `jbb` | 200 | `4f6037e4bddd4d2d…` | `JailbreakBench/JBB-Behaviors` |
-| `mmlu` | 623 | `e59dbcddccc48d63…` | `cais/mmlu` |
-| `orbench_hard` | 1,319 | `c1f008be8143dc40…` | `bench-llm/or-bench` |
-| `orbench_toxic` | 655 | `78736ea11952deee…` | `bench-llm/or-bench` |
-| `simpleqa` | 4,326 | `ffc1feb0152abbb6…` | see known gaps below |
-| `sorrybench` | 450 | `c8825d75ff4747d2…` | `sorry-bench/sorry-bench-202406` |
-| `sorrybench2` | 440 | `f0121e9676b8bd47…` | `sorry-bench/sorry-bench-202503` |
-| `sorrybench2_caesar` | 440 | (see `data/MANIFEST.json`) | `sorry-bench/sorry-bench-202503` |
-| `sorrybench2_fr` | 440 | (see `data/MANIFEST.json`) | `sorry-bench/sorry-bench-202503` |
-| `sorrybench2_roleplay` | 440 | (see `data/MANIFEST.json`) | `sorry-bench/sorry-bench-202503` |
-| `strongreject` | 313 | (see `data/MANIFEST.json`) | `alexandrasouly/strongreject` |
-| `xstest` | 450 | (see `data/MANIFEST.json`) | `paul-rottger/xstest` (authors' CSV) |
-| `xstest_mirror` | 250 | (see `data/MANIFEST.json`) | `AlignmentResearch/XSTest` (`neg` config) |
+| suite | items | sha256 | upstream | license (swept 2026-09-19) |
+|---|---|---|---|---|
+| `advbench` | 520 | `236dfea57f22b849…` | `walledai/AdvBench` | MIT (HF tag; content from `llm-attacks/llm-attacks`, MIT) |
+| `advbench_safe` | 416 | `9d65cec70609f121…` | `AmberYifan/AdvBench_safe` | **none stated** — prompts derive from AdvBench (MIT); the paired reference refusals are the mirror author's, unstated |
+| `custom_ccb` | 18 | `65dbd677c3f0fd67…` | `harness/make_custom.py` (pi-50) | own work, no third party involved |
+| `custom_fpb` | 8 | `3d92924806b76877…` | `harness/make_custom.py` (pi-50) | own work, no third party involved |
+| `gsm8k` | 1,319 | `d2cea8e5fcdf74d7…` | `openai/gsm8k` | MIT (HF tag) |
+| `jbb` | 200 | `4f6037e4bddd4d2d…` | `JailbreakBench/JBB-Behaviors` | MIT (HF tag; `JailbreakBench/jailbreakbench` repo MIT) |
+| `mmlu` | 623 | `e59dbcddccc48d63…` | `cais/mmlu` | MIT (HF tag) |
+| `orbench_hard` | 1,319 | `c1f008be8143dc40…` | `bench-llm/or-bench` | CC-BY-4.0 (HF tag; attribution required — cite Cui et al., arXiv:2405.20947) |
+| `orbench_toxic` | 655 | `78736ea11952deee…` | `bench-llm/or-bench` | CC-BY-4.0, as above |
+| `simpleqa` | 4,326 | `ffc1feb0152abbb6…` | see known gaps below | MIT for the content (`openai/simple-evals`, MIT) — but the recorded origin is a deleted `/tmp/sqa.csv`, so the chain from that file to SimpleQA is unverified |
+| `sorrybench` | 450 | `c8825d75ff4747d2…` | `sorry-bench/sorry-bench-202406` | MIT (project license: `sorry-bench/sorry-bench` repo MIT; HF tags say `other`) |
+| `sorrybench2` | 440 | `f0121e9676b8bd47…` | `sorry-bench/sorry-bench-202503` | MIT, as above |
+| `sorrybench2_caesar` | 440 | (see `data/MANIFEST.json`) | `sorry-bench/sorry-bench-202503` | MIT, as above |
+| `sorrybench2_fr` | 440 | (see `data/MANIFEST.json`) | `sorry-bench/sorry-bench-202503` | MIT, as above |
+| `sorrybench2_roleplay` | 440 | (see `data/MANIFEST.json`) | `sorry-bench/sorry-bench-202503` | MIT, as above |
+| `strongreject` | 313 | (see `data/MANIFEST.json`) | `alexandrasouly/strongreject` | MIT (repo license) |
+| `xstest` | 450 | (see `data/MANIFEST.json`) | `paul-rottger/xstest` (authors' CSV) | CC-BY-4.0 (repo license; attribution required — cite Röttger et al., arXiv:2308.01263) |
+| `xstest_mirror` | 250 | (see `data/MANIFEST.json`) | `AlignmentResearch/XSTest` (`neg` config) | CC-BY-4.0 by content (mirror of XSTest; the mirror itself states no license) |
+
+License sources: Hugging Face dataset API `license` tags and GitHub license
+API `spdx_id`, swept 2026-09-19. CC-BY-4.0 suites require attribution on
+reuse — the paper citations above satisfy it.
+
+### Removed: `hexphi` (HEx-PHI, 300 items)
+
+`data/hexphi.jsonl` (ex-`LLM-Tuning-Safety/HEx-PHI`, sha
+`1045ecfc19931bce…`) was **deleted from this repository** in the 2026-09-19
+license sweep and its `MANIFEST.json` entry with it. Reason: HEx-PHI ships
+under a custom gated Dataset License Agreement whose **Prohibited Transfers**
+clause forbids distributing, copying, embedding or hosting the dataset, with
+manual access approval and a right-to-deletion/termination clause —
+redistributing it from a public repo violates the terms under which it was
+obtained. No credit line can cure that; only removal can. To run the hexphi
+arm, fetch it yourself under your own approved access
+(`harness/fetch_datasets.py` knows the source) — do not re-commit the file.
 
 ## Known provenance gaps (stated, not papered over)
 
@@ -126,10 +145,15 @@ These are real weaknesses in the record, found while vendoring. Do not treat
    provenance is the free-text `note` (which does carry an arXiv id and title
    in each case checked). `harness/fetch_datasets.py`'s `SOURCES` table is the
    machine-readable counterpart and should be read together with the manifest.
-3. **Dataset licences were not captured at fetch time.** Nothing here claims a
-   redistribution right for the third-party suites. The upstream repos are the
-   authority; check them before redistributing `data/` beyond this repository.
-   The two `custom_*` batteries are pi-50-authored and carry no such question.
+3. **Dataset licences, swept 2026-09-19.** Every suite in the table above
+   now carries its upstream license (HF + GitHub license APIs). Standing
+   caveats: `advbench_safe` states no license (AdvBench-derived prompts +
+   unattributed refusals); `simpleqa`'s content is MIT but its recorded
+   origin is a deleted temp file, so the chain is unverified; SORRY-Bench
+   content is MIT via the project repo while HF tags say `other`;
+   `xstest_mirror` inherits CC-BY-4.0 by content with no statement of its
+   own. And see the HEx-PHI removal above — the one suite whose terms
+   forbade redistribution outright.
 4. **`advbench_safe` is a relabelled derivative of `advbench`** (upstream
    `AmberYifan/AdvBench_safe`), not an independent sample — see the
    `advbench_safe` correction note in `docs/2026-09-14_ablit-eval-suite.md`.

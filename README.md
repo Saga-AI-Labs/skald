@@ -101,10 +101,13 @@ license and a `PIN.md` provenance record. Full index: [`CREDITS.md`](CREDITS.md)
 - **Abliteration/refusal instrument** (`vendor/pi50_eval/`, via
   `adapters/pi50.py`): mixed authorship. The 7 stdlib scorers are **pi-50's
   own** (same author as the adapter), pinned by content digest because the
-  source `eval/` tree is not git-tracked; the 19 prompt suites (12,927 items)
-  are **third-party public research releases** whose licenses were never
-  captured at fetch time — `CREDITS.md` states this plainly rather than
-  implying a license, and `vendor/pi50_eval/PIN.md` carries the per-suite
-  provenance and the known gaps.
+  source `eval/` tree is not git-tracked; the 18 prompt suites (12,627 items)
+  are **third-party public research releases**, licenses swept 2026-09-19
+  (MIT: JailbreakBench, AdvBench, SORRY-Bench/-2, MMLU, GSM8K, StrongREJECT,
+  SimpleQA content; CC-BY-4.0: XSTest, OR-Bench — attribution required;
+  unstated: AdvBench_safe mirror; own work: custom_ccb/fpb). HEx-PHI was
+  **removed**: its gated license forbids redistribution — re-fetch under
+  your own approved access, do not re-commit. Per-suite table in
+  `vendor/pi50_eval/PIN.md`; index in `CREDITS.md`.
 
 Everything else in this repository is Skald's own code, Apache-2.0.
