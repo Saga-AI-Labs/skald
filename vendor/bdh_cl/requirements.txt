@@ -1,0 +1,4 @@
+torch>=2.3
+numpy
+requests
+pyarrow

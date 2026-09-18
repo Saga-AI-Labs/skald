@@ -1,8 +1,13 @@
 """Pi-50 phase-1 instrument suite adapter (plan §4.1, task skald-adapter-pi50).
 
-Runs the frozen Pi-50 phase-1 instruments from the BDH-CL repo's
-``scripts/pi50/`` directory for a target artifact and returns unified
-result records (plan §4.2).
+Attribution: the instrument invoked here
+(`scripts/pi50/phase1_manifest.py`) was written by the BDH-CL project
+(© 2025 Pathway Technology, Inc.) and is vendored unmodified under
+``vendor/bdh_cl/`` (see ``vendor/bdh_cl/PIN.md`` for pin and license).
+Skald adds only this wrapper adapter. Upstream bugs belong upstream.
+
+Runs the frozen Pi-50 phase-1 instrument for a target artifact and returns
+unified result records (plan §4.2).
 
 Interface: ``run(model, task, config) -> records[]`` (scaffold §5).  The
 adapter invokes each instrument unchanged via subprocess and parses its
@@ -39,6 +44,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -46,7 +52,26 @@ from typing import Any, Sequence
 from adapters import RECORD_FIELDS, SuiteAdapter
 from identity import hash_checkpoint
 
-DEFAULT_REPO = Path("/media/data/coding/bdh-cl")
+# The instrument script itself is vendored (byte-identical upstream copy).
+# BUT the check it performs is intrinsically bound to a BDH-CL git checkout:
+# the script runs `git rev-parse/ls-files/log` against its own repository to
+# audit evidence freshness. There is therefore no portable default for the
+# checkout under audit — config["repo"] must name a BDH-CL checkout
+# explicitly, and the adapter refuses to silently audit the wrong repo.
+DEFAULT_SCRIPT = (
+    Path(__file__).resolve().parent.parent
+    / "vendor"
+    / "bdh_cl"
+    / "scripts"
+    / "pi50"
+    / "phase1_manifest.py"
+)
+
+# Raw stdout artifacts live in Skald's own artifact dir, never in the vendor
+# tree (which must stay byte-identical to upstream).
+DEFAULT_ARTIFACT_DIR = (
+    Path(__file__).resolve().parent.parent / ".skald" / "pi50_raw"
+)
 
 TASKS = {"manifest_check"}
 
@@ -83,15 +108,21 @@ class Pi50Adapter(SuiteAdapter):
         config: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         config = config or {}
-        repo = Path(config.get("repo", DEFAULT_REPO))
+        repo = config.get("repo")
+        if not repo:
+            raise ValueError(
+                "pi50: manifest_check audits a BDH-CL checkout's evidence "
+                "freshness via its own git history, so config['repo'] must "
+                "name a BDH-CL checkout explicitly; there is no portable "
+                "default (see vendor/bdh_cl/PIN.md)"
+            )
+        repo = Path(repo)
         if not repo.is_dir():
             raise FileNotFoundError(f"pi50: BDH-CL suite repo not found: {repo}")
-        python = Path(config.get("python", repo / ".venv" / "bin" / "python"))
-        if not python.is_file():
-            raise FileNotFoundError(
-                f"pi50: suite python not found: {python} "
-                f"(override via config['python'])"
-            )
+        # The instrument is stdlib-only: any interpreter runs it.
+        python = config.get("python") or sys.executable
+        if not python:
+            raise FileNotFoundError("pi50: no python interpreter found")
         model = str(model)
         if not Path(model).is_file():
             raise FileNotFoundError(f"pi50: evaluated artifact not found: {model}")
@@ -113,7 +144,12 @@ class Pi50Adapter(SuiteAdapter):
         repo: Path,
         python: Path,
     ) -> list[dict[str, Any]]:
-        args = [str(python), "scripts/pi50/phase1_manifest.py", "--check"]
+        args = [str(python), str(DEFAULT_SCRIPT), "--check"]
+        if not DEFAULT_SCRIPT.is_file():
+            raise FileNotFoundError(
+                f"pi50: vendored instrument missing: {DEFAULT_SCRIPT} "
+                "(vendor tree broken — see vendor/bdh_cl/PIN.md)"
+            )
         env = dict(os.environ)
         env["PYTHONPATH"] = str(repo)
         out, rc = self._capture(repo, args, env, int(config.get("timeout", 300)))
@@ -122,12 +158,13 @@ class Pi50Adapter(SuiteAdapter):
             model=model,
             task="manifest_check",
             repo=repo,
-            script=repo / "scripts" / "pi50" / "phase1_manifest.py",
+            script=DEFAULT_SCRIPT,
             protocol=PROTOCOLS["manifest_check"],
             seed=None,
             metrics=parsed,
             stdout=out,
             n_default=1,
+            artifact_dir=config.get("artifact_dir"),
         )
 
     # --- machinery --------------------------------------------------------
@@ -196,8 +233,9 @@ class Pi50Adapter(SuiteAdapter):
         metrics: list[dict[str, Any]],
         stdout: str,
         n_default: int | None,
+        artifact_dir: str | Path | None = None,
     ) -> list[dict[str, Any]]:
-        artifact = self._write_artifact(repo, task, stdout)
+        artifact = self._write_artifact(task, stdout, artifact_dir)
         records = []
         for m in metrics:
             record = {
@@ -221,8 +259,10 @@ class Pi50Adapter(SuiteAdapter):
             records.append(record)
         return records
 
-    def _write_artifact(self, repo: Path, task: str, stdout: str) -> list[str]:
-        out_dir = repo / "out" / "skald_raw"
+    def _write_artifact(
+        self, task: str, stdout: str, artifact_dir: str | Path | None
+    ) -> list[str]:
+        out_dir = Path(artifact_dir) if artifact_dir else DEFAULT_ARTIFACT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = out_dir / f"{task}_{stamp}.txt"

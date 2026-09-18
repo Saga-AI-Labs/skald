@@ -1,6 +1,13 @@
 """BDH-CL continual-learning suite adapter (plan §4.1, task skald-adapter-bdh-cl).
 
-Runs the existing BDH-CL eval scripts against a target checkpoint and
+Attribution: the suite scripts invoked here (`eval_router.py`,
+`domain_eval.py`, `p5_inchain_check.py`) were written by the BDH-CL project
+(© 2025 Pathway Technology, Inc.; research fork of pathwaycom/bdh) and are
+vendored unmodified under ``vendor/bdh_cl/`` (see ``vendor/bdh_cl/PIN.md``
+for pin and license, ``vendor/bdh_cl/LICENSE.md`` for the upstream license).
+Skald adds only this wrapper adapter. Upstream bugs belong upstream.
+
+Runs the vendored BDH-CL eval scripts against a target checkpoint and
 returns unified result records (plan §4.2):
 
 - ``eval_router.py``     -> task "router"      (label-free likelihood routing,
@@ -32,7 +39,16 @@ from typing import Any
 from adapters import RECORD_FIELDS, SuiteAdapter
 from identity import hash_checkpoint
 
-DEFAULT_REPO = Path("/media/data/coding/bdh-cl")
+# Vendored BDH-CL evaluation subset (see vendor/bdh_cl/PIN.md). A fresh clone
+# works out of the box; point config["repo"] at an external BDH-CL checkout
+# only to develop against upstream HEAD.
+DEFAULT_REPO = Path(__file__).resolve().parent.parent / "vendor" / "bdh_cl"
+
+# Raw stdout artifacts live in Skald's own artifact dir, never in the vendor
+# tree (which must stay byte-identical to upstream).
+DEFAULT_ARTIFACT_DIR = (
+    Path(__file__).resolve().parent.parent / ".skald" / "bdh_raw"
+)
 
 TASKS = {"router", "domain_eval", "p5_inchain"}
 
@@ -106,12 +122,14 @@ class BdhClAdapter(SuiteAdapter):
         repo = Path(config.get("repo", DEFAULT_REPO))
         if not repo.is_dir():
             raise FileNotFoundError(f"bdh_cl: BDH-CL suite repo not found: {repo}")
-        python = Path(config.get("python", repo / ".venv" / "bin" / "python"))
-        if not python.is_file():
+        python = config.get("python") or str(repo / ".venv" / "bin" / "python")
+        if not Path(python).is_file():
             raise FileNotFoundError(
                 f"bdh_cl: suite python not found: {python} "
-                f"(override via config['python'])"
+                "(the eval scripts need a torch-capable interpreter; "
+                "override via config['python'])"
             )
+        python = Path(python)
         model = str(model)
         if not Path(model).is_file():
             raise FileNotFoundError(f"bdh_cl: model checkpoint not found: {model}")
@@ -172,6 +190,7 @@ class BdhClAdapter(SuiteAdapter):
             metrics=parsed,
             stdout=out,
             n_default=crops,
+            artifact_dir=config.get("artifact_dir"),
         )
 
     def _run_domain_eval(
@@ -209,6 +228,7 @@ class BdhClAdapter(SuiteAdapter):
             metrics=parsed,
             stdout=out,
             n_default=iters,
+            artifact_dir=config.get("artifact_dir"),
         )
 
     def _run_p5_inchain(
@@ -240,6 +260,7 @@ class BdhClAdapter(SuiteAdapter):
             metrics=parsed,
             stdout=out,
             n_default=1,
+            artifact_dir=config.get("artifact_dir"),
         )
 
     # --- machinery --------------------------------------------------------
@@ -279,8 +300,9 @@ class BdhClAdapter(SuiteAdapter):
         metrics: list[dict[str, Any]],
         stdout: str,
         n_default: int | None,
+        artifact_dir: str | Path | None = None,
     ) -> list[dict[str, Any]]:
-        artifact = self._write_artifact(repo, task, stdout)
+        artifact = self._write_artifact(task, stdout, artifact_dir)
         records = []
         for m in metrics:
             record = {
@@ -304,8 +326,10 @@ class BdhClAdapter(SuiteAdapter):
             records.append(record)
         return records
 
-    def _write_artifact(self, repo: Path, task: str, stdout: str) -> list[str]:
-        out_dir = repo / "out" / "skald_raw"
+    def _write_artifact(
+        self, task: str, stdout: str, artifact_dir: str | Path | None
+    ) -> list[str]:
+        out_dir = Path(artifact_dir) if artifact_dir else DEFAULT_ARTIFACT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = out_dir / f"{task}_{stamp}.txt"

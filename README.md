@@ -78,17 +78,25 @@ routes, adapter tasks, and `--config` keys are documented in
 
 ## Credits — borrowed code
 
-The Jacobian-Lens instrument (`vendor/jlens/`, driven by `adapters/jlens.py`)
-was written by **Anthropic PBC** — every module carries their `Copyright 2026
-Anthropic PBC` header — and is published through **Johnny Lin's Neuronpedia**
-open-source interpretability platform
-([github.com/hijohnnylin/neuronpedia](https://github.com/hijohnnylin/neuronpedia)).
-It implements the Jacobian lens from Anthropic's "Verbalizable Representations
-Form a Global Workspace in Language Models" (Gurnee et al., Transformer
-Circuits, 2026; reference implementation
-`github.com/anthropics/jacobian-lens`). Skald vendors that library
-**unmodified** at pinned commit `4e3f3b2` (digests in
-[`vendor/jlens/PIN.md`](vendor/jlens/PIN.md), upstream license at
-[`vendor/jlens/LICENSE`](vendor/jlens/LICENSE)) and adds only the wrapper
-adapter; all fitting/readout logic is upstream's work. Everything else in this
-repository is Skald's own code.
+Skald's own code is original to this project. The benchmark instruments it
+drives are not — each is vendored unmodified under `vendor/` with its
+license and a `PIN.md` provenance record. Full index: [`CREDITS.md`](CREDITS.md).
+
+- **Jacobian Lens** (`vendor/jlens/`, via `adapters/jlens.py`): written by
+  **Anthropic PBC** (`Copyright 2026 Anthropic PBC`), published through
+  **Johnny Lin's Neuronpedia**
+  ([github.com/hijohnnylin/neuronpedia](https://github.com/hijohnnylin/neuronpedia));
+  the lens from "Verbalizable Representations Form a Global Workspace in
+  Language Models" (Gurnee et al., 2026). Pinned at commit `4e3f3b2`,
+  Apache-2.0.
+- **BDH-CL evals + Pi-50 instrument** (`vendor/bdh_cl/`, via
+  `adapters/bdh_cl.py`, `adapters/pi50.py`): **Pathway Technology, Inc.**
+  (© 2025; research fork of `pathwaycom/bdh` — *The Dragon Hatchling*,
+  Kosowski et al.). Pinned at commit `8c28c6e`, MIT-style.
+- **Saga general-purpose benchmarks** (`vendor/saga_benchmarks/`, via
+  `adapters/saga.py`): **Saga AI Labs** (previously unlicensed; AGPL-3.0
+  `LICENSE` placed at its root during this consolidation). Pinned at commit
+  `5657fce`, **AGPL-3.0** — see `CREDITS.md`: the combined work that
+  executes this directory is AGPL-covered.
+
+Everything else in this repository is Skald's own code, Apache-2.0.

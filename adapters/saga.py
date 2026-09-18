@@ -1,8 +1,16 @@
 """Saga general-purpose suite adapter (plan §4.1, task skald-adapter-saga).
 
-Runs the evaluation machinery of the original Saga repo
-(``/media/data/coding/saga``) for a target model and returns unified result
-records (plan §4.2):
+Attribution: the benchmark machinery invoked here (`run_mmlu`, `run_gsm8k`,
+`run_bbq`, `BenchmarkResult`, `FrozenModelWrapper`, `configs/evaluation.yaml`)
+was written by the Saga project (Saga AI Labs) and is vendored unmodified
+under ``vendor/saga_benchmarks/`` (see ``vendor/saga_benchmarks/PIN.md`` for
+pin and license — AGPL-3.0, see root ``CREDITS.md`` for the combined-work
+notice). Skald adds only this wrapper adapter (plus its HumanEval shim, which
+exists because upstream Saga ships no `run_humaneval` runner). Upstream bugs
+belong upstream.
+
+Runs the vendored Saga evaluation machinery for a target model and returns
+unified result records (plan §4.2):
 
 - ``mmlu``     -> ``src/evaluation/benchmarks.py::run_mmlu``
 - ``humaneval``-> adapter-side pass@1 shim over the saga ``humaneval`` config
@@ -47,7 +55,12 @@ from typing import Any, Sequence
 from adapters import RECORD_FIELDS, SuiteAdapter
 from identity import hash_checkpoint
 
-DEFAULT_REPO = Path("/media/data/coding/saga")
+# Vendored Saga benchmark subset (see vendor/saga_benchmarks/PIN.md). A fresh
+# clone works out of the box; point config["repo"] at an external Saga
+# checkout only to develop against upstream HEAD.
+DEFAULT_REPO = (
+    Path(__file__).resolve().parent.parent / "vendor" / "saga_benchmarks"
+)
 
 TASKS = {"mmlu", "humaneval"}
 

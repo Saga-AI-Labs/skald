@@ -79,7 +79,9 @@ def test_manifest_check_records_have_required_fields():
     reason="BDH-CL phase-1 manifest / instrument not present",
 )
 def test_manifest_check_real_execution():
-    records = Pi50Adapter().run(str(MANIFEST), "manifest_check")
+    records = Pi50Adapter().run(
+        str(MANIFEST), "manifest_check", {"repo": str(REPO)}
+    )
     assert [r["metric"] for r in records] == ["manifest_current"]
     assert records[0]["value"] in (0.0, 1.0)
     for r in records:
@@ -98,7 +100,9 @@ def test_store_end_to_end_persist_and_readback(tmp_path, monkeypatch):
 
     store_mod._DEFAULT_STORE = None
     monkeypatch.setenv("SKALD_STORE_DIR", str(tmp_path / "isolated"))
-    records = Pi50Adapter().run(str(MANIFEST), "manifest_check")
+    records = Pi50Adapter().run(
+        str(MANIFEST), "manifest_check", {"repo": str(REPO)}
+    )
     stored = store.put(records)
     assert stored == records
     key = {

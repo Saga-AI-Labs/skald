@@ -76,9 +76,10 @@ Runs the BDH-CL eval scripts against a grown-ladder checkpoint:
 `scripts/eval_router.py` (`router`), `scripts/domain_eval.py`
 (`domain_eval`), `scripts/p5_inchain_check.py` (`p5_inchain`).
 
-Requires the BDH-CL suite repo (the adapter default is
-`/media/data/coding/bdh-cl`) with its own Python venv
-(`repo/.venv/bin/python`); both overridable via `--config`:
+Requires the BDH-CL eval code — vendored under `vendor/bdh_cl/`, which is
+the adapter default, so a fresh clone works — plus a torch-capable Python
+(`--config '{"python": ...}'`; the adapter falls back to
+`repo/.venv/bin/python`, which exists only in a full BDH-CL checkout):
 
 ```bash
 # router: label-free routing likelihood over a territory/domain layout
@@ -99,16 +100,21 @@ locally without a grown parent/child checkpoint pair**.
 ### pi50 — phase-1 instrument (`python -m adapters.pi50`)
 
 Runs the frozen Pi-50 phase-1 instrument `scripts/pi50/phase1_manifest.py
---check` from the BDH-CL repo. The `model` argument is the evaluated artifact;
-for `manifest_check` that is the committed
+--check` (vendored under `vendor/bdh_cl/`). The `model` argument is the
+evaluated artifact; for `manifest_check` that is the committed
 `docs/PHASE1-MANIFEST.md` in the suite repo.
 
-Requires the BDH-CL suite repo and its venv (defaults as above). Verified
-end-to-end on this box (see the walkthrough below):
+The check audits a BDH-CL checkout's evidence freshness through its own git
+history, so it is checkout-bound by nature: `config['repo']` must name a
+BDH-CL checkout explicitly (there is deliberately no default — the adapter
+refuses to silently audit the wrong repository). The instrument itself is
+stdlib-only and runs under any Python. Verified end-to-end on this box (see
+the walkthrough below):
 
 ```bash
-python -m adapters.pi50 /media/data/coding/bdh-cl/docs/PHASE1-MANIFEST.md manifest_check
-# persisted 1 pi50 records; queried back 1 matching
+python -m adapters.pi50 /media/data/coding/bdh-cl/docs/PHASE1-MANIFEST.md manifest_check \
+  --config '{"repo": "/media/data/coding/bdh-cl"}'
+# persisted 1 pi50 records; queried back N matching (N grows with the store)
 #   manifest_check:manifest_current = 0.0 (n=1, protocol='phase-1 artifact ...')
 ```
 
@@ -123,7 +129,8 @@ Runs the saga evaluation machinery over a local model:
 `configs/evaluation.yaml` entry — saga has no `run_humaneval` runner of its
 own).
 
-Requires the saga repo (default `/media/data/coding/saga`) and a Python with
+Requires the saga benchmark code — vendored under `vendor/saga_benchmarks/`,
+which is the adapter default, so a fresh clone works — and a Python with
 torch/transformers/datasets (`--config '{"python": ...}'`; the adapter falls
 back to `repo/.venv/bin/python`, then `python3`). Saga fetches its HF
 streaming datasets over the network — offline it raises instead of emitting
@@ -282,13 +289,14 @@ pip install -e ".[dev]"
 export SKALD_STORE_DIR="$PWD/.skald/demo-store"   # scratch store for this demo
 ```
 
-**2. Produce a record with a real adapter** (requires the BDH-CL suite repo at
-`/media/data/coding/bdh-cl` with its venv; the evaluated artifact is the
+**2. Produce a record with a real adapter** (requires a torch-capable
+Python for the BDH-CL eval scripts; the evaluated artifact is the
 suite's committed `docs/PHASE1-MANIFEST.md`):
 
 ```bash
-python -m adapters.pi50 /media/data/coding/bdh-cl/docs/PHASE1-MANIFEST.md manifest_check
-# persisted 1 pi50 records; queried back 1 matching
+python -m adapters.pi50 /media/data/coding/bdh-cl/docs/PHASE1-MANIFEST.md manifest_check \
+  --config '{"repo": "/media/data/coding/bdh-cl"}'
+# persisted 1 pi50 records; queried back N matching (N grows with the store)
 #   manifest_check:manifest_current = 0.0 (n=1, protocol='phase-1 artifact manifest consistency check ...')
 ```
 
@@ -334,7 +342,9 @@ suites under `.skald/jlens_raw`, `.skald/jlens_lenses`,
 - **saga needs network access** to its HF streaming datasets; offline it
   raises rather than emit 0-sample records. HumanEval is an adapter-side
   shim over saga's config entry, not a saga runner.
-- The suite repos (`/media/data/coding/bdh-cl`, `/media/data/coding/saga`)
-  and the torch-capable interpreter (`/media/data/coding/OBLITERATUS/.venv`)
-  are machine-specific paths; `--config` `repo`/`python` keys point the
-  adapters at your own clone/venv.
+- Benchmark code ships vendored (`vendor/`); what remains machine-specific
+  is the torch-capable interpreter (`--config '{"python": ...}'`, e.g.
+  `/media/data/coding/OBLITERATUS/.venv` on this box), the evaluated model
+  weights/corpora, and network access for HF datasets. A full BDH-CL
+  checkout is needed only for `pi50/manifest_check`, which audits that
+  checkout's own git history by design.

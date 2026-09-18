@@ -21,6 +21,11 @@ from adapters.bdh_cl import BdhClAdapter, PROTOCOLS, _domain_spec, _routes_spec
 REPO = Path("/media/data/coding/bdh-cl")
 CKPT = REPO / "out/skald_raw/normalized_bdh_wikitext2_last.pt"
 CORPUS = str(REPO / "data/tinyshakespeare.txt")
+# External prerequisite, declared explicitly: the eval scripts need a
+# torch-capable interpreter, which ships with the BDH-CL checkout, not with
+# Skald (the vendored code under vendor/bdh_cl/ is interpreter-agnostic).
+SUITE_PYTHON = "/media/data/coding/bdh-cl/.venv/bin/python"
+NEEDS_SUITE = not (CKPT.is_file() and Path(SUITE_PYTHON).is_file())
 
 ROUTER_OUT = """\
 router ckpt=out/skald_raw/normalized_bdh_wikitext2_last.pt | routes=[288, 576] n/head | window=32 tok | 8 crops/domain
@@ -114,7 +119,7 @@ def test_p5_parser():
     }
 
 
-@pytest.mark.skipif(not CKPT.is_file(), reason="normalized BDH-CL checkpoint not present")
+@pytest.mark.skipif(NEEDS_SUITE, reason="BDH-CL checkpoint or suite interpreter not present")
 def test_router_real_execution():
     records = _adapter().run(
         str(CKPT),
@@ -125,6 +130,7 @@ def test_router_real_execution():
             "window": 32,
             "crops": 4,
             "batch": 2,
+            "python": SUITE_PYTHON,
         },
     )
     ppl = [r for r in records if r["metric"] == "routed_perplexity"]
@@ -137,16 +143,24 @@ def test_router_real_execution():
         assert r["script_sha256"]
 
 
-@pytest.mark.skipif(not CKPT.is_file(), reason="normalized BDH-CL checkpoint not present")
+@pytest.mark.skipif(NEEDS_SUITE, reason="BDH-CL checkpoint or suite interpreter not present")
 def test_domain_eval_real_execution():
     records = _adapter().run(
-        str(CKPT), "domain_eval", {"domains": {"prose": CORPUS}, "iters": 10, "batch": 2}
+        str(CKPT),
+        "domain_eval",
+        {
+            "domains": {"prose": CORPUS},
+            "iters": 10,
+            "batch": 2,
+            "python": SUITE_PYTHON,
+        },
     )
     metrics = {r["metric"]: r["value"] for r in records}
     assert set(metrics) == {"prose:nll", "prose:ppl"}
     assert metrics["prose:ppl"] > 0
 
 
+@pytest.mark.skipif(NEEDS_SUITE, reason="BDH-CL checkpoint or suite interpreter not present")
 def test_store_end_to_end_persist_and_readback(tmp_path, monkeypatch):
     import store as store_mod
 
@@ -161,6 +175,7 @@ def test_store_end_to_end_persist_and_readback(tmp_path, monkeypatch):
             "window": 32,
             "crops": 2,
             "batch": 1,
+            "python": SUITE_PYTHON,
         },
     )
     try:
