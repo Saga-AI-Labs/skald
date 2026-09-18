@@ -1,0 +1,344 @@
+{
+ "jbb": {
+  "repo": "JailbreakBench/JBB-Behaviors",
+  "fetched": [
+   {
+    "config": "behaviors",
+    "split": "harmful",
+    "rows": 100,
+    "forced_expected_safe": false
+   },
+   {
+    "config": "behaviors",
+    "split": "benign",
+    "rows": 100,
+    "forced_expected_safe": true
+   }
+  ],
+  "note": "JBB arXiv:2404.01318 'JailbreakBench: An Open Robustness Benchmark for Jailbreaking Large Language Models' - paired harmful/benign behaviours; the benign half doubles as an over-refusal control",
+  "normalised": 200,
+  "dropped_no_prompt": 0,
+  "file": "data/jbb.jsonl",
+  "safe_true": 100,
+  "safe_false": 100,
+  "fetched_utc": "2026-09-14T19:52:49Z"
+ },
+ "simpleqa": {
+  "origin": "/tmp/sqa.csv",
+  "note": "arXiv:2411.04368 'Measuring short-form factuality in large language models'; grader distinguishes correct/incorrect/not_attempted",
+  "normalised": 4326,
+  "dropped_no_prompt": 0,
+  "file": "data/simpleqa.jsonl",
+  "safe_true": 4326,
+  "safe_false": 0,
+  "fetched_utc": "2026-09-14T21:04:26Z"
+ },
+ "xstest_mirror": {
+  "repo": "AlignmentResearch/XSTest",
+  "fetched": [
+   {
+    "config": "neg",
+    "split": "validation",
+    "rows": 250,
+    "forced_expected_safe": null
+   }
+  ],
+  "note": "fallback mirror of XSTest; expected_safe read from gen_target",
+  "normalised": 250,
+  "dropped_no_prompt": 0,
+  "file": "data/xstest_mirror.jsonl",
+  "safe_true": 250,
+  "safe_false": 0,
+  "fetched_utc": "2026-09-14T18:54:46Z"
+ },
+ "xstest": {
+  "origin": "https://raw.githubusercontent.com/paul-rottger/xstest/main/xstest_prompts.csv",
+  "rows_seen": 450,
+  "note": "XSTest arXiv:2308.01263 'XSTest: A Test Suite for Identifying Exaggerated Safety Behaviours in Large Language Models' - authors repo file; 450 rows = 18 types x 25, the contrast_* types are the genuinely unsafe controls",
+  "normalised": 450,
+  "dropped_no_prompt": 0,
+  "file": "data/xstest.jsonl",
+  "safe_true": 250,
+  "safe_false": 200,
+  "fetched_utc": "2026-09-14T19:52:48Z"
+ },
+ "hexphi": {
+  "repo": "LLM-Tuning-Safety/HEx-PHI",
+  "files": [
+   {
+    "file": "category_1.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_10.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_11.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_3.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_4.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_5.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_6.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_7.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_8.csv",
+    "rows_used": 30
+   },
+   {
+    "file": "category_9.csv",
+    "rows_used": 30
+   }
+  ],
+  "note": "HEx-PHI arXiv:2310.03693 'Fine-tuning Aligned Language Models Compromises Safety, Even When Users Do Not Intend To' - the ORIGINAL author repo, after the operator accepted its terms on 2026-09-14. Measured here: the repo ships 10 category CSVs of 30 bare instructions each = 300, and category_2.csv does not exist (resolve/ returns the literal body 'Entry not found'), which explains the 300-vs-330 gap left by the public copies YanY-NLP/HEx-PHI and jkazdan/HeX-PHI-usable - they are faithful, not lossy. Files carry no use-case column either: the harmful framing is inside the instruction text",
+  "normalised": 300,
+  "dropped_no_prompt": 0,
+  "file": "data/hexphi.jsonl",
+  "safe_true": 0,
+  "safe_false": 300,
+  "fetched_utc": "2026-09-14T19:52:47Z"
+ },
+ "sorrybench": {
+  "repo": "sorry-bench/sorry-bench-202406",
+  "files": [
+   {
+    "file": "question.jsonl",
+    "rows_used": 450
+   }
+  ],
+  "note": "SORRY-Bench arXiv:2406.14598 'SORRY-Bench: Systematically Evaluating Large Language Model Safety Refusal' - ORIGINAL repo, 450 single-turn prompts / 45 categories; consent accepted 2026-09-14. Supersedes the SillyTilly/SorryBench copy used earlier",
+  "normalised": 450,
+  "dropped_no_prompt": 0,
+  "file": "data/sorrybench.jsonl",
+  "safe_true": 0,
+  "safe_false": 450,
+  "fetched_utc": "2026-09-14T21:04:26Z"
+ },
+ "advbench_safe": {
+  "repo": "AmberYifan/AdvBench_safe",
+  "fetched": [
+   {
+    "config": "default",
+    "split": "train",
+    "rows": 416,
+    "forced_expected_safe": true
+   }
+  ],
+  "note": "harmful prompt + reference refusal pairs; usable for efficacy and refusal-style comparison, NOT as an over-refusal control",
+  "normalised": 416,
+  "dropped_no_prompt": 0,
+  "file": "data/advbench_safe.jsonl",
+  "safe_true": 416,
+  "safe_false": 0,
+  "fetched_utc": "2026-09-14T18:55:04Z",
+  "expected_safe": false,
+  "label_source": "corrected by pi-50 2026-09-15 after spot-check: datasets-server schema shows features ['prompt','response'] only; response text begins 'I'm sorry, but I cannot assist' -> the prompts are the harmful AdvBench behaviours",
+  "corrected_utc": "2026-09-15T04:15:47Z"
+ },
+ "custom_ccb": {
+  "origin": "eval/make_custom.py",
+  "normalised": 18,
+  "note": "real ids resolved + titles matched 2026-09-14; fake ids verified HTTP 404"
+ },
+ "custom_fpb": {
+  "origin": "eval/make_custom.py",
+  "normalised": 8,
+  "note": "defective premises; correct behaviour is refutation, not compliance"
+ },
+ "advbench": {
+  "repo": "walledai/AdvBench",
+  "files": [
+   {
+    "file": "data/train-00000-of-00001.parquet",
+    "rows_used": 520
+   }
+  ],
+  "note": "AdvBench arXiv:2307.15043 'Universal and Transferable Adversarial Attacks on Aligned Language Models' - 520 behaviour strings plus optimisation targets; we send the prompt only. Consent accepted 2026-09-14",
+  "normalised": 520,
+  "dropped_no_prompt": 0,
+  "file": "data/advbench.jsonl",
+  "safe_true": 0,
+  "safe_false": 520,
+  "fetched_utc": "2026-09-14T19:52:48Z"
+ },
+ "strongreject": {
+  "origin": "https://raw.githubusercontent.com/alexandrasouly/strongreject/main/strongreject_dataset/strongreject_dataset.csv",
+  "rows_seen": 313,
+  "note": "StrongREJECT arXiv:2402.10260 'A StrongREJECT for Empty Jailbreaks' - 313 forbidden prompts with a scoring_category and a jailbreak source column; measured 313 rows, not the 310 written down earlier",
+  "normalised": 313,
+  "dropped_no_prompt": 0,
+  "file": "data/strongreject.jsonl",
+  "safe_true": 0,
+  "safe_false": 313,
+  "fetched_utc": "2026-09-14T20:50:07Z"
+ },
+ "orbench_hard": {
+  "repo": "bench-llm/or-bench",
+  "fetched": [
+   {
+    "config": "or-bench-hard-1k",
+    "split": "train",
+    "rows": 1319,
+    "forced_expected_safe": true
+   }
+  ],
+  "note": "OR-Bench arXiv:2405.20947 'OR-Bench: An Over-Refusal Benchmark for Large Language Models' - refined hard subset, 1319 seemingly-toxic prompts that the benchmark expects a model to ANSWER. Label assigned by us from the benchmark construction, not copied from a column",
+  "normalised": 1319,
+  "dropped_no_prompt": 0,
+  "file": "data/orbench_hard.jsonl",
+  "safe_true": 1319,
+  "safe_false": 0,
+  "fetched_utc": "2026-09-14T20:50:20Z"
+ },
+ "orbench_toxic": {
+  "repo": "bench-llm/or-bench",
+  "fetched": [
+   {
+    "config": "or-bench-toxic",
+    "split": "train",
+    "rows": 655,
+    "forced_expected_safe": false
+   }
+  ],
+  "note": "same arXiv:2405.20947 - 655 genuinely toxic controls paired with the hard subset, so over-refusal is scored against a real refusal baseline rather than against our own judgement of what counts as harmful",
+  "normalised": 655,
+  "dropped_no_prompt": 0,
+  "file": "data/orbench_toxic.jsonl",
+  "safe_true": 0,
+  "safe_false": 655,
+  "fetched_utc": "2026-09-14T20:50:24Z"
+ },
+ "sorrybench2": {
+  "repo": "sorry-bench/sorry-bench-202503",
+  "files": [
+   {
+    "file": "question.jsonl",
+    "rows_used": 440
+   }
+  ],
+  "note": "SORRY-Bench 2 arXiv:2406.14598 'SORRY-Bench: Systematically Evaluating Large Language Model Safety Refusal' - base arm, measured 440 prompts over 44 categories (v1 was 450 over 45; both numbers are right, they belong to different versions of the benchmark)",
+  "normalised": 440,
+  "dropped_no_prompt": 0,
+  "file": "data/sorrybench2.jsonl",
+  "safe_true": 0,
+  "safe_false": 440,
+  "fetched_utc": "2026-09-14T21:01:56Z"
+ },
+ "sorrybench2_caesar": {
+  "repo": "sorry-bench/sorry-bench-202503",
+  "files": [
+   {
+    "file": "question_caesar.jsonl",
+    "rows_used": 440
+   }
+  ],
+  "note": "same paper, arXiv:2406.14598 - Caesar-cipher arm: same 440 intents rendered unrecognisable as character strings, so a model that merely learned to avoid the surface tokens will behave differently here",
+  "normalised": 440,
+  "dropped_no_prompt": 0,
+  "file": "data/sorrybench2_caesar.jsonl",
+  "safe_true": 0,
+  "safe_false": 440,
+  "fetched_utc": "2026-09-14T21:01:57Z"
+ },
+ "sorrybench2_roleplay": {
+  "repo": "sorry-bench/sorry-bench-202503",
+  "files": [
+   {
+    "file": "question_role_play.jsonl",
+    "rows_used": 440
+   }
+  ],
+  "note": "same paper, arXiv:2406.14598 - role-play arm, the classic frame that restores refusals in shallowly-edited models",
+  "normalised": 440,
+  "dropped_no_prompt": 0,
+  "file": "data/sorrybench2_roleplay.jsonl",
+  "safe_true": 0,
+  "safe_false": 440,
+  "fetched_utc": "2026-09-14T21:01:58Z"
+ },
+ "sorrybench2_fr": {
+  "repo": "sorry-bench/sorry-bench-202503",
+  "files": [
+   {
+    "file": "question_translate-fr.jsonl",
+    "rows_used": 440
+   }
+  ],
+  "note": "same paper, arXiv:2406.14598 - machine-translated French arm. Chosen as the nearest available stand-in for our German deployment question; it tests language transfer, it does NOT answer the German case",
+  "normalised": 440,
+  "dropped_no_prompt": 0,
+  "file": "data/sorrybench2_fr.jsonl",
+  "safe_true": 0,
+  "safe_false": 440,
+  "fetched_utc": "2026-09-14T21:02:47Z"
+ },
+ "gsm8k": {
+  "repo": "openai/gsm8k",
+  "config": "main",
+  "split": "test",
+  "origin": "https://datasets-server.huggingface.co",
+  "rows_seen": 1319,
+  "normalised": 1319,
+  "dropped_no_gold": 0,
+  "prompt_template": "question + fixed '#### <number>' instruction (identical for every arm)",
+  "note": "arXiv:2110.14168 'Training Verifiers to Solve Math Word Problems' - GSM8K test set",
+  "fetched_utc": "2026-09-15T04:37:14Z",
+  "elapsed_s": 5.9,
+  "items_file": "gsm8k.jsonl"
+ },
+ "mmlu": {
+  "repo": "cais/mmlu",
+  "configs": [
+   "college_mathematics",
+   "high_school_statistics",
+   "college_biology",
+   "logical_fallacies"
+  ],
+  "split": "test",
+  "origin": "https://datasets-server.huggingface.co",
+  "fetched": [
+   {
+    "config": "college_mathematics",
+    "split": "test",
+    "rows": 100
+   },
+   {
+    "config": "high_school_statistics",
+    "split": "test",
+    "rows": 216
+   },
+   {
+    "config": "college_biology",
+    "split": "test",
+    "rows": 144
+   },
+   {
+    "config": "logical_fallacies",
+    "split": "test",
+    "rows": 163
+   }
+  ],
+  "normalised": 623,
+  "dropped_bad_row": 0,
+  "note": "arXiv:2009.03300 'Measuring Massive Multitask Language Understanding' - 4 fixed subjects (math/stats/bio/fallacies), chosen once so arms cannot differ by subset",
+  "fetched_utc": "2026-09-15T04:37:17Z",
+  "elapsed_s": 2.9,
+  "items_file": "mmlu.jsonl"
+ }
+}
