@@ -1,0 +1,11 @@
+[project]
+name = "skald"
+version = "0.1.0"
+description = "Consolidated local evaluation framework"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["adapters*", "store*", "api*", "ui*", "identity*", "surfaces*"]
