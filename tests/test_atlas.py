@@ -165,6 +165,26 @@ def test_unreachable_server_is_an_atlas_error():
         )
 
 
+def test_tier1_weight_space_rows_use_rel_l2(atlas_url, monkeypatch):
+    import adapters.atlas as mod
+
+    tier1 = {
+        "model_a": JOB_A, "model_b": JOB_B, "tier": "weight_space",
+        "n_compared": 400,
+        "edit_signature": {"n_tensors": 400},
+        "rows": [
+            {"layer": 18, "slot": "ssm_out", "rel_l2": 0.42,
+             "name_a": "blk.18.ssm_out.weight", "name_b": "blk.18.ssm_out.weight"},
+        ],
+    }
+    monkeypatch.setattr(mod, "_get", lambda *a, **k: tier1)
+    records = _adapter().run(SHA, "diff", _cfg("http://unused"))
+    by_metric = {r["metric"]: r for r in records}
+    assert by_metric["hotspot_rank1_rel_l2"]["value"] == 0.42
+    assert "tensor::blk.18.ssm_out.weight" in by_metric["hotspot_rank1_rel_l2"]["artifacts"]
+    assert "weight_space" in by_metric["hotspot_rank1_rel_l2"]["protocol"]
+
+
 def test_store_roundtrip_isolated(atlas_url, tmp_path, monkeypatch):
     import store as store_mod
 

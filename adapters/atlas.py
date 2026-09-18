@@ -132,17 +132,25 @@ class AtlasAdapter(SuiteAdapter):
             if value is not None
         ]
         for rank, row in enumerate(body.get("rows", [])[:top_n], start=1):
+            # Tier-2 (statistic_diff) rows carry pct_change + tensor_name;
+            # tier-1 (weight_space) rows carry rel_l2 + name_a/name_b.
             pct = _number(row.get("pct_change"))
-            if pct is None:
+            rel = _number(row.get("rel_l2"))
+            if pct is not None:
+                metric, value = f"hotspot_rank{rank}_pct_change", pct
+            elif rel is not None:
+                metric, value = f"hotspot_rank{rank}_rel_l2", rel
+            else:
                 continue
+            tensor = row.get("tensor_name") or row.get("name_a")
             records.append(
                 self._record(
                     checkpoint=checkpoint,
-                    metric=f"hotspot_rank{rank}_pct_change",
-                    value=pct,
+                    metric=metric,
+                    value=value,
                     protocol=protocol,
                     seed=seed,
-                    artifacts=base_artifacts + [f"tensor::{row.get('tensor_name')}"],
+                    artifacts=base_artifacts + [f"tensor::{tensor}"],
                 )
             )
         if not records:
