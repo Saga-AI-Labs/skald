@@ -69,6 +69,7 @@ All four suites, tasks, and the `--config` keys they honor:
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
 | openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server` |
+| atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
 | jlens | `adapters.jlens` | `layer_readout`, `verbal_report`, `directed_modulation`, `multi_hop_reasoning`, `general_broadcast`, `selective_mediation` | `python`, `vendor_dir`, `lens_source`, `prompts`, `source_layers`, `dim_batch`, `max_seq_len`, `skip_first`, `dtype`, `layers`, `position`, `top_n`, `seed`, `timeout`, `artifact_dir`, `readout_prompt` |
 
 ### bdh_cl — continual-learning suite (`python -m adapters.bdh_cl`)
@@ -233,6 +234,33 @@ budget spent itself thinking and returned null content, which the client
 now reads from the `reasoning`/`reasoning_content` fallback fields), and
 letter extraction takes the *last* A–D match (completions echo the
 question's own options first).
+
+### atlas — weight diffs (`python -m adapters.atlas`)
+
+Queries a weight-atlas API for the weight-space difference between two
+scans — the abliteration-forensics instrument: scan stock + edited twin,
+diff, and the hotspots say where the edit landed, layer and tensor.
+`model` is the Skald checkpoint SHA-256 the scan is asserted to belong to;
+`config['atlas_job']` / `config['with_job']` are the two scan ids. The
+mapping is caller-asserted and recorded verbatim in `protocol` — the
+adapter never guesses it (atlas addresses scans by job id, not by hash,
+so no automatic join exists).
+
+```bash
+python -m adapters.atlas <checkpoint_sha256> diff \
+  --config '{"atlas_job": "<scan-a>", "with_job": "<scan-b>"}'
+```
+
+Emits `delta_mean/max_change_pct`, `delta_n_changed_above_5pct`, and
+`hotspot_rank{k}_pct_change` records (tensor names in `artifacts[]`).
+Verified live: a same-weights null pair reads all-0.0 (deterministic
+scanner, honest null control); stock-vs-abliterated Qwen3.8-27B reads
+max 0.0127% concentrated in mid-layer `ssm_out`/`o_proj`/`down_proj` —
+below any surgical-edit signature, which is itself a finding (see PIN
+note below). Default `atlas_url` is the atlas box on this LAN; the real
+stock-vs-abliterated Qwen3.8-Flash-Next pair is not scanned yet — that
+scan is the prerequisite for the harmed-vs-freed query this adapter
+exists to serve.
 
 ### jlens — layer readout (`python -m adapters.jlens`)
 
