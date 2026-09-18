@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
-from identity import hash_checkpoint
+from identity import hash_checkpoint, hash_model
 
 # The instrument script itself is vendored (byte-identical upstream copy).
 # BUT the check it performs is intrinsically bound to a BDH-CL git checkout:
@@ -194,36 +194,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _hash_dir(path: Path) -> str:
-    """Deterministic digest of a directory: sorted relative paths + contents.
-
-    Identical in construction to ``adapters/saga.py``'s helper of the same
-    name — deliberately, because the checkpoint hash is the store's join key
-    and the same weights must hash the same way under every adapter.
-    ``tests/test_pi50_abliteration.py`` asserts the agreement rather than
-    trusting the comment.
-    """
-    h = hashlib.sha256()
-    for rel in sorted(p.relative_to(path) for p in path.rglob("*") if p.is_file()):
-        h.update(rel.as_posix().encode("utf-8"))
-        h.update(b"\0")
-        with open(path / rel, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-    return h.hexdigest()
-
-
 def _checkpoint_sha256(model: str | Path) -> str:
     """SHA-256 identity of the evaluated model artifact.
 
-    Single files use ``identity.hash_checkpoint``; directories (an
-    ``huggingface_hub`` snapshot of sharded weights is one) are hashed over
-    their sorted relative paths + contents.
+    Single files hash by content; directories (an ``huggingface_hub``
+    snapshot of sharded weights is one) hash deterministically over their
+    sorted contents.  Delegates to the shared ``identity`` module (no
+    excludes — abliteration verdicts must be comparable with saga's) so
+    one checkpoint yields one string in every adapter; the cross-adapter
+    agreement test now asserts structure, not coincidence.
     """
-    path = Path(model)
-    if path.is_file():
-        return hash_checkpoint(path)
-    return _hash_dir(path)
+    return hash_model(model, exclude=None)
 
 
 # --- abliteration / refusal task handlers ------------------------------------
@@ -966,9 +947,10 @@ class Pi50Adapter(SuiteAdapter, _Pi50AbliterationMixin):
         records = []
         for m in metrics:
             record = {
-                # _checkpoint_sha256, not the raw identity.hash_checkpoint: an
-                # huggingface_hub snapshot of sharded weights is a DIRECTORY, and the
-                # raw helper opens it with open() and dies with IsADirectoryError.
+                # The shared identity.hash_model: files hash by content,
+                # directories (e.g. sharded-weight snapshots) hash
+                # deterministically — never the raw file-only helper, which
+                # dies with IsADirectoryError on directories.
                 "model_checkpoint_sha256": _checkpoint_sha256(model),
                 "adapter": "pi50",
                 "suite": "pi50",

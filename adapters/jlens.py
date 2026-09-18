@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
-from identity import hash_checkpoint
+from identity import hash_dir, hash_model
 
 DEFAULT_VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "jlens"
 DEFAULT_PYTHON = Path("/media/data/coding/OBLITERATUS/.venv/bin/python")
@@ -172,33 +172,19 @@ def _hash_dir(path: Path) -> str:
     HF ``snapshot_download(local_dir=...)`` caches fetch metadata under
     ``.cache/huggingface/`` which is excluded — the hash covers the checkpoint
     and tokenizer artifacts only, so it is stable across re-downloads.
+    Delegates to the shared ``identity`` module (default excludes).
     """
-    h = hashlib.sha256()
-    for rel in sorted(
-        p.relative_to(path)
-        for p in path.rglob("*")
-        if p.is_file() and ".cache" not in p.relative_to(path).parts
-    ):
-        h.update(rel.as_posix().encode("utf-8"))
-        h.update(b"\0")
-        with open(path / rel, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-    return h.hexdigest()
+    return hash_dir(path)
 
 
 def _checkpoint_sha256(model: str | Path) -> str:
     """SHA-256 identity of the evaluated model artifact.
 
-    Single files use ``identity.hash_checkpoint``; directories are hashed
-    deterministically over their sorted contents (HF cache metadata aside).
+    Single files hash by content; directories hash deterministically (HF
+    cache metadata aside).  Delegates to the shared ``identity`` module so
+    one checkpoint yields one string in every adapter.
     """
-    path = Path(model)
-    if path.is_file():
-        return hash_checkpoint(path)
-    if path.is_dir():
-        return _hash_dir(path)
-    raise FileNotFoundError(f"jlens: model artifact not found: {path}")
+    return hash_model(model)
 
 
 class JLensAdapter(SuiteAdapter):

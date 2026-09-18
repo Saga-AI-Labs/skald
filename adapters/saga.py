@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
-from identity import hash_checkpoint
+from identity import hash_model
 
 # Vendored Saga benchmark subset (see vendor/saga_benchmarks/PIN.md). A fresh
 # clone works out of the box; point config["repo"] at an external Saga
@@ -108,24 +108,12 @@ def _now() -> str:
 def _checkpoint_sha256(model: str | Path) -> str:
     """SHA-256 identity of the evaluated model artifact.
 
-    Single files use ``identity.hash_checkpoint``; directories are hashed
-    deterministically over their sorted relative paths + contents.
+    Single files hash by content; directories hash deterministically over
+    their sorted contents (all files — Saga checkpoints carry no fetch
+    metadata to exclude).  Delegates to the shared ``identity`` module so
+    one checkpoint yields one string in every adapter.
     """
-    path = Path(model)
-    if path.is_file():
-        return hash_checkpoint(path)
-    return _hash_dir(path)
-
-
-def _hash_dir(path: Path) -> str:
-    h = hashlib.sha256()
-    for rel in sorted(p.relative_to(path) for p in path.rglob("*") if p.is_file()):
-        h.update(rel.as_posix().encode("utf-8"))
-        h.update(b"\0")
-        with open(path / rel, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-    return h.hexdigest()
+    return hash_model(model, exclude=None)
 
 
 def _ci(score: float, n: int | None) -> tuple[float | None, float | None]:
