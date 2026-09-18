@@ -66,8 +66,9 @@ All four suites, tasks, and the `--config` keys they honor:
 | Adapter | `python -m` | Tasks | `--config` keys |
 |---|---|---|---|
 | bdh_cl | `adapters.bdh_cl` | `router`, `domain_eval`, `p5_inchain` | `repo`, `python`, `routes`, `domains`, `window`, `crops`, `batch`, `oracle_routes`, `mb`, `iters`, `parent`, `timeout` |
-| pi50 | `adapters.pi50` | `manifest_check` | `repo`, `python`, `timeout` |
+| pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
+| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server` |
 | jlens | `adapters.jlens` | `layer_readout`, `verbal_report`, `directed_modulation`, `multi_hop_reasoning`, `general_broadcast`, `selective_mediation` | `python`, `vendor_dir`, `lens_source`, `prompts`, `source_layers`, `dim_batch`, `max_seq_len`, `skip_first`, `dtype`, `layers`, `position`, `top_n`, `seed`, `timeout`, `artifact_dir`, `readout_prompt` |
 
 ### bdh_cl — continual-learning suite (`python -m adapters.bdh_cl`)
@@ -204,6 +205,34 @@ python -m adapters.saga .skald/saga_models/tiny-gpt2 mmlu \
 
 (`mmlu` and `humaneval` bounded runs are exercised by the suite's own
 real-material tests in `tests/test_saga.py`.)
+
+### openai_compat — served models (`python -m adapters.openai_compat`)
+
+Benchmarks any OpenAI-compatible `/chat/completions` endpoint (vLLM,
+llama.cpp server, …) with the same `mmlu` / `humaneval` task shapes as the
+saga adapter, so served-model numbers land in the store next to weighed-in
+ones. `model` is the endpoint base URL; the served model id comes from
+`config['model']` (default: the server's first `/models` entry). Transport
+is stdlib-only; items load from Hugging Face datasets-server over HTTP by
+default, or inline via `config['mmlu_items']` / `config['humaneval_items']`
+for offline or custom batteries.
+
+```bash
+python -m adapters.openai_compat http://host:8888/v1 mmlu \
+  --config '{"model": "my-served-model", "max_samples": 20}'
+```
+
+Identity honesty: a served model exposes no weights, so
+`model_checkpoint_sha256` is the hash of
+`openai-compat::<url>::<model>` — a stable *endpoint* identity, and every
+record's `protocol` carries an UNVERIFIED marker. Never silently compare
+these numbers with weighed-in records. Verified live against a vLLM box
+(`mmlu` accuracy 1.0 on a 2-item probe). Two lessons from that run, now in
+the code: reasoning models need `max_tokens` headroom (default 64 — a 16
+budget spent itself thinking and returned null content, which the client
+now reads from the `reasoning`/`reasoning_content` fallback fields), and
+letter extraction takes the *last* A–D match (completions echo the
+question's own options first).
 
 ### jlens — layer readout (`python -m adapters.jlens`)
 

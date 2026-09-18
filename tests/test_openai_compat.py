@@ -1,0 +1,208 @@
+"""Tests for ``adapters.openai_compat`` — the served-model endpoint adapter.
+
+All tests run against an in-process stub OpenAI-compatible server (stdlib
+``http.server`` in a thread): no network, no weights, no datasets package.
+Real-endpoint verification is a documented manual step (docs/usage.md), not
+part of this suite.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+import store
+from adapters import RECORD_FIELDS, SuiteAdapter
+from adapters.openai_compat import EndpointError, OpenAICompatAdapter
+
+MMLU_ITEMS = [
+    {"prompt": "2+2?", "choices": ["3", "4", "5", "6"], "gold": "B"},
+    {"prompt": "Capital of France?", "choices": ["Rome", "Paris", "Oslo", "Bern"], "gold": "B"},
+    {"prompt": "Water boils at?", "choices": ["90C", "100C", "110C", "120C"], "gold": "B"},
+]
+
+HUMANEVAL_ITEMS = [
+    {
+        "prompt": "def add(a, b):\n    \"\"\"Add.\"\"\"\n",
+        "entry_point": "add",
+        "test": "def check(f):\n    assert f(1, 2) == 3\n",
+    },
+    {
+        "prompt": "def sub(a, b):\n    \"\"\"Subtract.\"\"\"\n",
+        "entry_point": "sub",
+        "test": "def check(f):\n    assert f(5, 3) == 2\n",
+    },
+]
+
+
+class _Stub(BaseHTTPRequestHandler):
+    """Canned OpenAI-compatible server: answers B, emits correct code."""
+
+    completions_seen: list = []
+
+    def _json(self, body, status=200):
+        payload = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self):
+        if self.path == "/models":
+            self._json({"object": "list", "data": [{"id": "stub-model"}]})
+        else:
+            self._json({"error": "nope"}, status=404)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(length) or b"{}")
+        prompt = req.get("messages", [{}])[-1].get("content", "")
+        type(self).completions_seen.append(prompt)
+        if "def add" in prompt or "def sub" in prompt:
+            # echo a correct body for whichever function was asked
+            name = "add" if "def add" in prompt else "sub"
+            op = "+" if name == "add" else "-"
+            text = f"    return a {op} b"
+        else:
+            text = "B"
+        self._json({"choices": [{"message": {"content": text}}]})
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture()
+def endpoint():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
+    _Stub.completions_seen = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def _adapter():
+    return OpenAICompatAdapter()
+
+
+def test_adapter_interface():
+    adapter = _adapter()
+    assert isinstance(adapter, SuiteAdapter)
+    sig = inspect.signature(adapter.run)
+    params = list(sig.parameters)
+    assert params[:2] == ["model", "task"]
+    assert "config" in params
+
+
+def test_model_must_be_a_url():
+    with pytest.raises(ValueError, match="must be the endpoint base URL"):
+        _adapter().run("/local/path/model", "mmlu", {})
+
+
+def test_unknown_task_is_rejected(endpoint):
+    with pytest.raises(ValueError, match="unsupported task"):
+        _adapter().run(endpoint, "gsm8k", {})
+
+
+def test_mmlu_inline_items(endpoint):
+    records = _adapter().run(
+        endpoint, "mmlu",
+        {"model": "stub-model", "mmlu_items": MMLU_ITEMS, "num_fewshot": 1},
+    )
+    assert len(records) == 1
+    r = records[0]
+    assert set(r) == set(RECORD_FIELDS)
+    assert r["adapter"] == "openai_compat" and r["task"] == "mmlu"
+    assert r["metric"] == "accuracy"
+    assert r["value"] == 1.0 and r["n"] == 2  # 3 items, 1 used as shot
+    assert "UNVERIFIED" in r["protocol"]
+    assert r["artifacts"] == [f"endpoint::{endpoint}"]
+    assert re.fullmatch(r"[0-9a-f]{64}", r["model_checkpoint_sha256"])
+
+
+def test_humaneval_inline_items(endpoint):
+    records = _adapter().run(
+        endpoint, "humaneval",
+        {"model": "stub-model", "humaneval_items": HUMANEVAL_ITEMS},
+    )
+    assert len(records) == 1
+    r = records[0]
+    assert r["metric"] == "pass_at_1"
+    assert r["value"] == 1.0 and r["n"] == 2
+    assert "UNVERIFIED" in r["protocol"]
+
+
+def test_default_model_comes_from_the_server(endpoint):
+    records = _adapter().run(
+        endpoint, "mmlu", {"mmlu_items": MMLU_ITEMS, "num_fewshot": 1}
+    )
+    assert "stub-model" in records[0]["protocol"]
+
+
+def test_identity_is_stable_and_endpoint_scoped(endpoint):
+    a = _adapter().run(
+        endpoint, "mmlu", {"mmlu_items": MMLU_ITEMS, "num_fewshot": 1}
+    )[0]
+    b = _adapter().run(endpoint, "humaneval", {"humaneval_items": HUMANEVAL_ITEMS[:1]})[0]
+    assert a["model_checkpoint_sha256"] == b["model_checkpoint_sha256"]
+    c = _adapter().run(
+        endpoint, "mmlu",
+        {"model": "other-model", "mmlu_items": MMLU_ITEMS, "num_fewshot": 1},
+    )[0]
+    assert c["model_checkpoint_sha256"] != a["model_checkpoint_sha256"]
+
+
+def test_reasoning_fallback_when_content_is_null(endpoint):
+    from adapters.openai_compat import _Client
+
+    class _ReasoningStub(_Stub):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self._json({"choices": [{"message": {
+                "role": "assistant", "content": None,
+                "reasoning": "thinking... so the answer is B",
+            }}]})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ReasoningStub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = _Client(
+            f"http://127.0.0.1:{server.server_port}",
+            api_key=None, timeout=30,
+        )
+        client.model = "reasoning-stub"
+        assert "B" in client.complete("pick B", 16)
+    finally:
+        server.shutdown()
+
+
+def test_unreachable_endpoint_is_an_endpoint_error():
+    with pytest.raises(EndpointError, match="cannot reach"):
+        _adapter().run("http://127.0.0.1:1", "mmlu", {"mmlu_items": MMLU_ITEMS})
+
+
+def test_empty_items_raise(endpoint):
+    with pytest.raises(EndpointError, match="zero evaluation items"):
+        _adapter().run(endpoint, "mmlu", {"mmlu_items": []})
+
+
+def test_store_roundtrip_isolated(endpoint, tmp_path, monkeypatch):
+    import store as store_mod
+
+    store_mod._DEFAULT_STORE = None
+    monkeypatch.setenv("SKALD_STORE_DIR", str(tmp_path / "isolated"))
+    records = _adapter().run(
+        endpoint, "mmlu", {"mmlu_items": MMLU_ITEMS, "num_fewshot": 1}
+    )
+    stored = store.put(records)
+    assert stored == records
+    back = store.query({"adapter": "openai_compat"})
+    assert len(back) == len(records)
