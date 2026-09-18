@@ -54,13 +54,29 @@ digests remain the authority either way.
 
 | file | sha256 | bytes |
 |---|---|---|
-| `harness/compare_arms.py` | `ae6043a2fbe8a68d9a044e6b87f87ba5c9445647cb43493cdbba6f112fce35c3` | 12,624 |
+| `harness/compare_arms.py` | `f7c37d122114e39bd81769e3561c32b0f657e5dcd745e5180023d3676cf92cd1` | 13,573 |
 | `harness/fetch_datasets.py` | `ae29c395846394fc363f8b8aaaf7af733c163a77f6fb3f2e0c907ebc09075490` | 26,995 |
 | `harness/make_custom.py` | `07f7ec035a926655f739ca08be3ffdf81aa46a7ab6941e457a76e9a8e9503a8c` | 7,149 |
 | `harness/run_suite.py` | `1db82d28d06f2aad7fd94eded3e4bc98442dbdcccdf3034641c86251b0a65ed8` | 12,358 |
 | `harness/score_capability.py` | `21d61787f11263951fb4a16c2be066788ee93f2c83f02b9da7f035ee35386d13` | 8,700 |
 | `harness/score_confab.py` | `6ca32a1bbf0c558adc2c79f2754aa7f433325a2635456661ee51ec1ba2ba7639` | 5,659 |
 | `harness/score_refusal.py` | `e2a720f69d2e47e2ffc8186e4ae34cab711ea1e7315e14557e4fce3c115ea134` | 11,355 |
+
+> **Re-pin note (2026-09-18).** `compare_arms.py` was fixed **upstream** in
+> `/srv/coding/Qwen3.8-Flash-Next-Single-DGX-Spark/eval/` and re-vendored byte-identically,
+> rather than patched in place here (rule 1). Three defects were closed:
+>
+> 1. `--json` crashed with `TypeError: keys must be str… not tuple` because `per_class` was
+>    keyed by `(classA, classB)` tuples.
+> 2. That crash left a **truncated** `--json` file on disk, because `json.dump` streams into the
+>    open handle; the write is now `tmp` + `os.replace`.
+> 3. The prompt fallback called `os.path.join(HERE, "data", sf)` one line **above** its own
+>    `if sf` guard, so a provenance header without `suite_file` died with
+>    `TypeError: join() argument must be str… not NoneType` instead of skipping the fallback.
+>
+> The digest above therefore supersedes `ae6043a2…fce35c3` (12,624 B) and the intermediate
+> `4753a468…19519a22` (13,268 B). Each fix is pinned by a test in
+> `tests/test_pi50_abliteration.py`.
 
 `fetch_datasets.py` is the acquisition tool and the reason `manifest.json` is
 trustworthy: it is what recorded repo/config/split/row-count/field-mapping per

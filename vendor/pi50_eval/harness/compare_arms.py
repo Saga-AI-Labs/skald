@@ -121,8 +121,12 @@ def main() -> int:
     prompts = {}
     for meta in (ma, mb):
         sf = meta.get("suite_file")
-        path = os.path.join(HERE, "data", sf)
-        if sf and os.path.exists(path):
+        # the guard used to sit one line BELOW the join, so a header without
+        # suite_file (None) crashed os.path.join with a TypeError instead of just
+        # skipping the fallback -- which is the only sane behaviour for a transcript
+        # that carries its prompts inline.
+        path = os.path.join(HERE, "data", sf) if sf else None
+        if path and os.path.exists(path):
             for ln in open(path, encoding="utf-8", errors="replace"):
                 try:
                     r = json.loads(ln)
@@ -246,10 +250,20 @@ def main() -> int:
     if args.jsonout:
         out = {"shared": len(shared), "only_a": len(only_a), "only_b": len(only_b),
                "transitions": {f"{ca}->{cb}": len(v) for (ca, cb), v in flips.items()},
-               "per_class": {k: dict(v) for k, v in per_cat.items()},
+               # per_cat is keyed by (classA, classB) tuples; json.dump rejects non-str keys,
+               # so flatten to "A->B" here rather than crash the whole --json write.
+               "per_class": {k: {f"{ca}->{cb}": n for (ca, cb), n in v.items()}
+                             for k, v in per_cat.items()},
                "median_tokens": {t: (st.median(v) if v else None) for t, v in toks.items()},
                "disagreements": interesting, "pairing_warnings": hard}
-        json.dump(out, open(args.jsonout, "w"), indent=1)
+        # Atomic write. json.dump streams straight into the open file, so any
+        # serialisation error (e.g. a tuple key) used to leave a TRUNCATED file on
+        # disk -- and a caller that only checks "did --json appear" would then parse
+        # half a document. Write beside it, then rename.
+        tmp = f"{args.jsonout}.part"
+        with open(tmp, "w") as fh:
+            json.dump(out, fh, indent=1)
+        os.replace(tmp, args.jsonout)
         os.chmod(args.jsonout, 0o600)
     return 1 if hard else 0
 
