@@ -67,8 +67,8 @@ All four suites, tasks, and the `--config` keys they honor:
 |---|---|---|---|
 | bdh_cl | `adapters.bdh_cl` | `router`, `domain_eval`, `p5_inchain` | `repo`, `python`, `routes`, `domains`, `window`, `crops`, `batch`, `oracle_routes`, `mb`, `iters`, `parent`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check` | `repo`, `python`, `timeout` |
-| saga | `adapters.saga` | `mmlu`, `humaneval` | `python`, `max_samples`, `num_fewshot`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
-| jlens | `adapters.jlens` | `layer_readout`, `verbal_report`, `directed_modulation`, `multi_hop_reasoning`, `general_broadcast`, `selective_mediation` | `python`, `lens_source`, `prompts`, `source_layers`, `dim_batch`, `max_seq_len`, `skip_first`, `dtype`, `layers`, `position`, `top_n`, `seed`, `timeout`, `artifact_dir` |
+| saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
+| jlens | `adapters.jlens` | `layer_readout`, `verbal_report`, `directed_modulation`, `multi_hop_reasoning`, `general_broadcast`, `selective_mediation` | `python`, `vendor_dir`, `lens_source`, `prompts`, `source_layers`, `dim_batch`, `max_seq_len`, `skip_first`, `dtype`, `layers`, `position`, `top_n`, `seed`, `timeout`, `artifact_dir`, `readout_prompt` |
 
 ### bdh_cl — continual-learning suite (`python -m adapters.bdh_cl`)
 
