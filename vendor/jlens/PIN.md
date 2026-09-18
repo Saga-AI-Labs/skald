@@ -1,5 +1,18 @@
 # Vendored upstream: Neuronpedia jlens package
 
+## Authorship and provenance
+
+The `jlens` library was written by **Anthropic PBC** — every vendored module
+carries their `# Copyright 2026 Anthropic PBC` header (Apache-2.0) — and is
+published through **Johnny Lin's Neuronpedia** open-source interpretability
+platform (`https://github.com/hijohnnylin/neuronpedia`, contact
+johnny@neuronpedia.org). It implements the Jacobian lens described in
+Anthropic's "Verbalizable Representations Form a Global Workspace in Language
+Models" (Gurnee et al., Transformer Circuits, 2026; reference implementation
+`github.com/anthropics/jacobian-lens`). Skald's authors wrote none of this
+code: `adapters/jlens.py` is a wrapper that shells out to the unmodified
+library, and this directory is a byte-identical copy, not a fork.
+
 This directory pins an unmodified copy of the Apache-2.0 `jlens` Python
 package from the Neuronpedia repository, integrated for reproducible
 invocation from the Skald JLens adapter (`adapters/jlens.py`). The copy is

@@ -1,5 +1,14 @@
 """JLens suite adapter (plan §4.5, task skald-adapter-jlens).
 
+Attribution: the ``jlens`` library wrapped here was written by **Anthropic
+PBC** (copyright headers in every module, Apache-2.0) and is published through
+Johnny Lin's Neuronpedia platform (https://github.com/hijohnnylin/neuronpedia);
+it implements the Jacobian lens from Anthropic's "Verbalizable Representations
+Form a Global Workspace in Language Models" (Gurnee et al., 2026). Skald ships
+that library unmodified under ``vendor/jlens/`` (see ``vendor/jlens/PIN.md``
+for pin and digests, ``vendor/jlens/LICENSE`` for the upstream license) and
+adds only this wrapper adapter. Upstream bugs belong upstream.
+
 Wraps the Apache-2.0 Neuronpedia ``jlens`` library (pinned, vendored,
 unmodified under ``vendor/jlens/``) to read out early-layer residual-stream
 representations of an ablated model as scalar probability records — one

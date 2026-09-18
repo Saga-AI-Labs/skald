@@ -75,3 +75,20 @@ Each adapter CLI (`python -m adapters.bdh_cl`, `python -m adapters.pi50`,
 machinery, persists the unified records, and reads them back. All surface
 routes, adapter tasks, and `--config` keys are documented in
 [`docs/usage.md`](docs/usage.md).
+
+## Credits — borrowed code
+
+The Jacobian-Lens instrument (`vendor/jlens/`, driven by `adapters/jlens.py`)
+was written by **Anthropic PBC** — every module carries their `Copyright 2026
+Anthropic PBC` header — and is published through **Johnny Lin's Neuronpedia**
+open-source interpretability platform
+([github.com/hijohnnylin/neuronpedia](https://github.com/hijohnnylin/neuronpedia)).
+It implements the Jacobian lens from Anthropic's "Verbalizable Representations
+Form a Global Workspace in Language Models" (Gurnee et al., Transformer
+Circuits, 2026; reference implementation
+`github.com/anthropics/jacobian-lens`). Skald vendors that library
+**unmodified** at pinned commit `4e3f3b2` (digests in
+[`vendor/jlens/PIN.md`](vendor/jlens/PIN.md), upstream license at
+[`vendor/jlens/LICENSE`](vendor/jlens/LICENSE)) and adds only the wrapper
+adapter; all fitting/readout logic is upstream's work. Everything else in this
+repository is Skald's own code.
