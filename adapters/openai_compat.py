@@ -351,6 +351,8 @@ class _Client:
 
 def _fetch_rows(server: str, dataset: str, config: str, n: int) -> list[dict]:
     """Fetch *n* test rows, paginated: datasets-server caps length at 100."""
+    import time
+
     rows: list[dict] = []
     offset = 0
     while len(rows) < n:
@@ -362,23 +364,38 @@ def _fetch_rows(server: str, dataset: str, config: str, n: int) -> list[dict]:
         )
         rows.extend(_fetch_page(url))
         offset += length
+        time.sleep(0.3)  # politeness gap; bursts get 429s otherwise
     return rows
 
 
-def _fetch_page(url: str) -> list[dict]:
+def _fetch_page(url: str, retries: int = 5) -> list[dict]:
+    import time
+
     req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise EndpointError(
-            f"openai_compat: datasets-server {url} returned HTTP {exc.code}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise EndpointError(
-            f"openai_compat: cannot reach datasets-server {url}: {exc.reason} "
-            "(offline? pass inline mmlu_items/humaneval_items via config)"
-        ) from exc
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            # datasets-server rate-limits bursts (429) and occasionally
+            # sheds load (502/503/504): back off and retry, honoring
+            # Retry-After when the server names a wait.
+            if exc.code in (429, 502, 503, 504) and attempt < retries:
+                wait = exc.headers.get("Retry-After")
+                delay = float(wait) if wait is not None else 2.0 * (2 ** attempt)
+                time.sleep(min(delay, 60.0))
+                attempt += 1
+                continue
+            raise EndpointError(
+                f"openai_compat: datasets-server {url} returned HTTP {exc.code}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise EndpointError(
+                f"openai_compat: cannot reach datasets-server {url}: {exc.reason} "
+                "(offline? pass inline mmlu_items/humaneval_items via config)"
+            ) from exc
     try:
         return [r["row"] for r in body["rows"]]
     except (KeyError, TypeError) as exc:
