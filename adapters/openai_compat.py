@@ -128,10 +128,12 @@ class OpenAICompatAdapter(SuiteAdapter):
         subjects = list(config.get("subjects", _MMLU_SUBJECTS))
         items = config.get("mmlu_items")
         if items is None:
+            cache_dir = config.get("datasets_cache")
             items = _fetch_mmlu(
                 config.get("datasets_server", _DEFAULT_DATASETS_SERVER),
                 subjects,
                 nf if ms is None else nf + (ms or 0),
+                cache_dir,
             )
             coverage = (
                 f"over {len(subjects)} MMLU subjects ({','.join(subjects)})"
@@ -193,6 +195,7 @@ class OpenAICompatAdapter(SuiteAdapter):
             items = _fetch_humaneval(
                 config.get("datasets_server", _DEFAULT_DATASETS_SERVER),
                 ms if ms is not None else 164,
+                config.get("datasets_cache"),
             )
             coverage = "over openai/openai_humaneval"
         else:
@@ -349,12 +352,20 @@ class _Client:
         )
 
 
-def _fetch_rows(server: str, dataset: str, config: str, n: int) -> list[dict]:
-    """Fetch *n* test rows, paginated: datasets-server caps length at 100."""
+def _fetch_rows(server: str, dataset: str, config: str, n: int,
+                 cache_dir: str | Path | None = None) -> list[dict]:
+    """Fetch *n* test rows, paginated: datasets-server caps length at 100.
+
+    Successful fetches accumulate in a local JSON cache
+    (``<root>/.skald/dataset_cache/``, overridable), so a won fetch is
+    never repeated and later runs survive throttling or offline boxes.
+    Test splits are static; the cache carries no TTL by design.
+    """
     import time
 
-    rows: list[dict] = []
-    offset = 0
+    cached = _read_cache(cache_dir, dataset, config)
+    rows: list[dict] = list(cached)
+    offset = len(rows)
     while len(rows) < n:
         length = min(100, n - len(rows))
         url = (
@@ -362,13 +373,50 @@ def _fetch_rows(server: str, dataset: str, config: str, n: int) -> list[dict]:
             f"&config={urllib.parse.quote(config, safe='')}"
             f"&split=test&offset={offset}&length={length}"
         )
-        rows.extend(_fetch_page(url))
-        offset += length
-        time.sleep(0.3)  # politeness gap; bursts get 429s otherwise
+        page = _fetch_page(url)
+        if not page:
+            break
+        rows.extend(page)
+        offset += len(page)
+        _write_cache(cache_dir, dataset, config, rows)
+        time.sleep(2.0)  # politeness gap; bursts get 429s otherwise
     return rows
 
 
-def _fetch_page(url: str, retries: int = 5) -> list[dict]:
+def _cache_path(cache_dir: str | Path | None, dataset: str, config: str) -> Path:
+    root = Path(cache_dir) if cache_dir else (
+        Path(__file__).resolve().parent.parent / ".skald" / "dataset_cache"
+    )
+    safe = lambda s: re.sub(r"[^0-9A-Za-z._-]+", "-", s)
+    return root / safe(dataset) / f"{safe(config)}.json"
+
+
+def _read_cache(cache_dir: str | Path | None, dataset: str, config: str) -> list[dict]:
+    path = _cache_path(cache_dir, dataset, config)
+    if not path.is_file():
+        return []
+    try:
+        body = json.loads(path.read_text())
+    except (ValueError, OSError):
+        return []
+    return body if isinstance(body, list) else []
+
+
+def _write_cache(cache_dir: str | Path | None, dataset: str,
+                 config: str, rows: list[dict]) -> None:
+    path = _cache_path(cache_dir, dataset, config)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rows))
+        import os
+
+        os.replace(tmp, path)
+    except OSError:
+        pass  # cache is best-effort; the fetch itself already succeeded
+
+
+def _fetch_page(url: str, retries: int = 8) -> list[dict]:
     import time
 
     req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
@@ -385,7 +433,7 @@ def _fetch_page(url: str, retries: int = 5) -> list[dict]:
             if exc.code in (429, 502, 503, 504) and attempt < retries:
                 wait = exc.headers.get("Retry-After")
                 delay = float(wait) if wait is not None else 2.0 * (2 ** attempt)
-                time.sleep(min(delay, 60.0))
+                time.sleep(min(delay, 120.0))
                 attempt += 1
                 continue
             raise EndpointError(
@@ -404,10 +452,12 @@ def _fetch_page(url: str, retries: int = 5) -> list[dict]:
         ) from exc
 
 
-def _fetch_mmlu(server: str, subjects: list[str], per_subject: int) -> list[dict]:
+def _fetch_mmlu(server: str, subjects: list[str], per_subject: int,
+               cache_dir: str | Path | None = None) -> list[dict]:
     items = []
     for subject in subjects:
-        for row in _fetch_rows(server, _MMLU_DATASET, subject, per_subject):
+        for row in _fetch_rows(server, _MMLU_DATASET, subject, per_subject,
+                               cache_dir):
             letters = "ABCD"
             gold = letters[int(row["answer"])]
             items.append(
@@ -416,8 +466,10 @@ def _fetch_mmlu(server: str, subjects: list[str], per_subject: int) -> list[dict
     return items
 
 
-def _fetch_humaneval(server: str, n: int) -> list[dict]:
-    return _fetch_rows(server, _HUMANEVAL_DATASET, _HUMANEVAL_CONFIG, n)
+def _fetch_humaneval(server: str, n: int,
+                     cache_dir: str | Path | None = None) -> list[dict]:
+    return _fetch_rows(server, _HUMANEVAL_DATASET, _HUMANEVAL_CONFIG, n,
+                       cache_dir)
 
 
 class _Timeout(Exception):
