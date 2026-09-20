@@ -350,11 +350,22 @@ class _Client:
 
 
 def _fetch_rows(server: str, dataset: str, config: str, n: int) -> list[dict]:
-    url = (
-        f"{server}/rows?dataset={urllib.parse.quote(dataset, safe='')}"
-        f"&config={urllib.parse.quote(config, safe='')}"
-        f"&split=test&offset=0&length={n}"
-    )
+    """Fetch *n* test rows, paginated: datasets-server caps length at 100."""
+    rows: list[dict] = []
+    offset = 0
+    while len(rows) < n:
+        length = min(100, n - len(rows))
+        url = (
+            f"{server}/rows?dataset={urllib.parse.quote(dataset, safe='')}"
+            f"&config={urllib.parse.quote(config, safe='')}"
+            f"&split=test&offset={offset}&length={length}"
+        )
+        rows.extend(_fetch_page(url))
+        offset += length
+    return rows
+
+
+def _fetch_page(url: str) -> list[dict]:
     req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
