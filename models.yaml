@@ -27,7 +27,14 @@ models:
 
   - sha256: 00f39f2e7105b8d9888b1a9dff2c366161816b952e662ef4cb40bfca81055820
     name: qwen3.8-flash-next @ :8888 (unverified endpoint)
-    description: Served-model identity (self-reported name); arm ambiguous across runs — see September notes before citing
+    description: >-
+      Served-model identity (self-reported name). INCONCLUSIVE for the
+      2026-09-20 runs (mmlu 0.4 @21:34Z, 0.2 @22:10Z, humaneval 0.0 x2):
+      the operator confirms one run measured the abliterated arm, but the
+      recipe logs cannot say which — treat all four records as
+      arm-ambiguous and do not cite per-arm. Later runs carry explicit
+      arm labels (qwen3.8-flash-next-stock / -ablit) and are distinct
+      identities.
     kind: endpoint
 
   - sha256: 888d54d81cbf2a044f5ede2e7611c83685bb85fa91fd5190196464d02a65f2ab
