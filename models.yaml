@@ -26,19 +26,26 @@ models:
     kind: weights
 
   - sha256: 00f39f2e7105b8d9888b1a9dff2c366161816b952e662ef4cb40bfca81055820
-    name: qwen3.8-flash-next @ :8888 (unverified endpoint)
+    name: qwen3.8-flash-next-stock @ :8888 (unverified endpoint)
     description: >-
-      Served-model identity (self-reported name; both arms served under it,
-      so the arm lives in timestamps + this note, not in the hash).
+      Served-model identity for the Sep-20 runs, when the server reported
+      the name qwen3.8-flash-next-stock.
       RESOLVED 2026-09-21: the Sep-20 22:10 mmlu 0.2 run replicates exactly
       (mmlu 0.2 @Sep-21 19:29Z, root-verified ablit) and the operator
       recalls the ablit arm loaded then — attribute 22:10 (+22:13 humaneval)
       to ABLIT, 21:34 (mmlu 0.4, in the stock cluster) to STOCK, both
       circumstantial-but-convergent. Stock cluster: 0.4/0.35/0.39.
-      Records from 2026-09-21 ~18:20-18:35Z are STOCK (server root
-      Mia-AiLab/Qwen3.8-Flash-Next-NVFP4); from ~19:29Z are ABLIT
-      (server root drowzeys/...-ablit-...). Later runs should carry
-      explicit arm labels and become distinct identities.
+    kind: endpoint
+
+  - sha256: c7340d45cc2550852bd0c06c0e23ef6cd36c6ecbdb841f8054d2f1b726fe1653
+    name: qwen3.8-flash-next @ :8888 (unverified endpoint)
+    description: >-
+      Served-model identity for Sep-21 runs, when the server reported the
+      bare name qwen3.8-flash-next. Arm by timestamp (server roots
+      verified same-evening): 18:20/18:32/18:35Z STOCK
+      (Mia-AiLab/Qwen3.8-Flash-Next-NVFP4), 19:29/19:31Z ABLIT
+      (drowzeys/...-ablit-...). Same collision caveat as the Sep-20
+      identity above.
     kind: endpoint
 
   - sha256: 888d54d81cbf2a044f5ede2e7611c83685bb85fa91fd5190196464d02a65f2ab
