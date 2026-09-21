@@ -625,39 +625,44 @@ def _document(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)}</title>
+<script>try{{var t=localStorage.getItem("skald-theme");if(t)document.documentElement.setAttribute("data-theme",t);}}catch(e){{}}</script>
 <style>
-body{{max-width:120ch;margin:2rem auto;padding:0 1rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;line-height:1.5}}
-nav a{{margin-right:1rem;color:#0366d6;text-decoration:none}}
+:root{{color-scheme:dark;--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--border:#30363d;--accent-bg:#161b22;--link:#4493f8;--chip-bg:#161b22;--track:#212830;--fill:#1f6feb;--kind-bg:#0c2d6b;--kind-border:#1f6feb;--err:#ffa657}}
+html[data-theme="light"]{{color-scheme:light;--bg:#ffffff;--fg:#1f2328;--muted:#57606a;--border:#d0d7de;--accent-bg:#f6f8fa;--link:#0366d6;--chip-bg:#f6f8fa;--track:#eaeef2;--fill:#0969da;--kind-bg:#ddf4ff;--kind-border:#54aeff;--err:#b35900}}
+body{{max-width:120ch;margin:2rem auto;padding:0 1rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;line-height:1.5;background:var(--bg);color:var(--fg)}}
+nav a{{margin-right:1rem;color:var(--link);text-decoration:none}}
 nav a.active{{font-weight:bold}}
 table{{border-collapse:collapse;width:100%}}
-th,td{{border:1px solid #ccc;padding:.25rem .5rem;text-align:left;vertical-align:top;font-size:13px}}
-th{{background:#f6f8fa}}
+th,td{{border:1px solid var(--border);padding:.25rem .5rem;text-align:left;vertical-align:top;font-size:13px}}
+th{{background:var(--accent-bg)}}
 td.mono{{font-size:12px}}
-code{{background:#f6f8fa;padding:0 .25rem}}
-form.filters{{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin:1rem 0;padding:1rem;border:1px solid #ddd;border-radius:4px}}
+code{{background:var(--accent-bg);padding:0 .25rem}}
+form.filters{{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin:1rem 0;padding:1rem;border:1px solid var(--border);border-radius:4px}}
 form.filters .field{{display:flex;flex-direction:column;font-size:12px}}
-input,button{{padding:.25rem .4rem;font:inherit}}
-.meta{{color:#57606a}}
-.chip{{background:#f6f8fa;border:1px solid #ddd;border-radius:3px;padding:0 .35rem;margin-right:.35rem}}
+input,button,select,textarea{{padding:.25rem .4rem;font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px}}
+.meta{{color:var(--muted)}}
+.chip{{background:var(--chip-bg);border:1px solid var(--border);border-radius:3px;padding:0 .35rem;margin-right:.35rem}}
 .anomaly{{margin:.35rem 0}}
-.empty{{color:#57606a}}
-.error p{{color:#b35900}}
+.empty{{color:var(--muted)}}
+.error p{{color:var(--err)}}
 td.modelname{{font-weight:bold;white-space:nowrap}}
-td.proto{{max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#57606a}}
-form.filters select{{max-width:44ch;padding:.25rem .4rem;font:inherit}}
-small.help{{display:block;color:#57606a;font-size:12px;max-width:44ch}}
-.modelcard{{border:1px solid #ddd;border-radius:4px;padding:.6rem 1rem;margin:.6rem 0;background:#f6f8fa}}
-.kind{{background:#ddf4ff;border:1px solid #54aeff;border-radius:2em;padding:0 .6rem;font-size:12px}}
+td.proto{{max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}}
+form.filters select{{max-width:44ch}}
+small.help{{display:block;color:var(--muted);font-size:12px;max-width:44ch}}
+.modelcard{{border:1px solid var(--border);border-radius:4px;padding:.6rem 1rem;margin:.6rem 0;background:var(--accent-bg)}}
+.kind{{background:var(--kind-bg);border:1px solid var(--kind-border);border-radius:2em;padding:0 .6rem;font-size:12px}}
 .bar-row{{display:flex;align-items:center;gap:.6rem;margin:.15rem 0;max-width:70ch}}
-.bar-rank{{width:3ch;text-align:right;color:#57606a}}
-.bar-track{{flex:1;background:#eaeef2;border-radius:3px;height:1.1em;overflow:hidden}}
-.bar-fill{{display:block;background:#0969da;height:100%}}
+.bar-rank{{width:3ch;text-align:right;color:var(--muted)}}
+.bar-track{{flex:1;background:var(--track);border-radius:3px;height:1.1em;overflow:hidden}}
+.bar-fill{{display:block;background:var(--fill);height:100%}}
 .bar-val{{width:7ch;font-variant-numeric:tabular-nums}}
 h4{{margin-bottom:.2rem}}
+#theme-toggle{{float:right}}
 </style>
 </head>
 <body>
 <header>
+<button id="theme-toggle" type="button" title="Toggle dark/light theme">☾ / ☀</button>
 <h1>{heading}</h1>
 {_nav(active)}
 </header>
@@ -665,6 +670,7 @@ h4{{margin-bottom:.2rem}}
 {content}
 </main>
 {_embed_json(envelope)}
+<script>(function(){{var b=document.getElementById("theme-toggle");if(!b)return;function label(){{var l=document.documentElement.getAttribute("data-theme")==="light";b.textContent=l?"☾ dark":"☀ light";}}label();b.addEventListener("click",function(){{var cur=document.documentElement.getAttribute("data-theme")==="light"?"dark":"light";if(cur==="dark")document.documentElement.removeAttribute("data-theme");else document.documentElement.setAttribute("data-theme","light");try{{localStorage.setItem("skald-theme",cur);}}catch(e){{}}label();}});}})();</script>
 </body>
 </html>"""
 

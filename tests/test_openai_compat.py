@@ -206,3 +206,32 @@ def test_store_roundtrip_isolated(endpoint, tmp_path, monkeypatch):
     assert stored == records
     back = store.query({"adapter": "openai_compat"})
     assert len(back) == len(records)
+
+
+def test_extract_code_prefers_python_fences():
+    from adapters.openai_compat import _extract_code
+
+    assert _extract_code("```python\n    return 1\n```") == "    return 1"
+    assert _extract_code("text\n```\n    return 2\n```") == "    return 2"
+    multi = "```text\nnope\n```\n```python\n    return 3\n```"
+    assert _extract_code(multi) == "    return 3"
+
+
+def test_extract_code_preserves_indentation():
+    from adapters.openai_compat import _extract_code
+
+    assert _extract_code("\n\n    return a + b") == "    return a + b"
+    assert _extract_code("    return a + b") == "    return a + b"
+
+
+def test_check_runs_fenced_code():
+    from adapters.openai_compat import _check
+
+    problem = {
+        "prompt": "def add(a, b):\n",
+        "entry_point": "add",
+        "test": "def check(f):\n    assert f(1, 2) == 3\n",
+    }
+    chatty = "Here you go:\n```python\n    return a + b\n```\nHope that helps!"
+    assert _check(problem, chatty, 10) is True
+    assert _check(problem, "definitely not code at all ((((", 10) is False

@@ -476,6 +476,32 @@ class _Timeout(Exception):
     pass
 
 
+_FENCE_RE = re.compile(r"```(\w*)\s*\n(.*?)```", re.S)
+
+
+def _extract_code(gen_code: str) -> str:
+    """Pull executable code out of a chatty completion.
+
+    Preference order: a ```python-fenced block, then any fenced block,
+    then the raw text with leading blank lines dropped (preserving the
+    first line's indentation — stripping all leading whitespace dedents
+    the body out of the function and SyntaxErrors). Callers still drop a
+    leading ``def`` line when the model echoed the whole function.
+    """
+    fences = _FENCE_RE.findall(gen_code or "")
+    if fences:
+        python_first = [body for tag, body in fences if tag == "python"]
+        chosen = (python_first or [fences[0][1]])[0]
+    else:
+        chosen = gen_code or ""
+    lines = chosen.split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
 def _check(problem: dict, gen_code: str, exec_timeout: int) -> bool:
     """Execute the generated completion against the problem's tests."""
     def _alarm(_sig, _frm) -> None:
@@ -484,10 +510,9 @@ def _check(problem: dict, gen_code: str, exec_timeout: int) -> bool:
     ns: dict = {}
     # Drop leading blank lines only: stripping all leading whitespace would
     # dedent the first code line out of the function body (SyntaxError).
-    lines = gen_code.split("\n")
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    body = "\n".join(lines)
+    body = _extract_code(gen_code)
+    if body.startswith("def "):
+        body = "\n".join(body.split("\n")[1:]).lstrip("\n")
     if body.startswith("def "):
         body = "\n".join(body.split("\n")[1:]).lstrip("\n")
     full = problem["prompt"] + "\n" + body + "\n" + problem["test"]

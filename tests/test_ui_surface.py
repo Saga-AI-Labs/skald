@@ -235,13 +235,16 @@ def test_record_rendering_shows_all_record_fields_and_escapes(tmp_path):
     for field in RECORD_FIELDS:
         assert f"<th>{field}</th>" in page
 
-    # Values render html-escaped (never raw), and the only <script> tag is the
-    # embedded application/json block.
+    # Values render html-escaped (never raw). Scripts on the page are
+    # exactly the embedded application/json data block plus the theme
+    # toggle (head init + toggle handler count as the page furniture).
     assert "&lt;b&gt;P1 &amp; &lt;i&gt;tricky&lt;/i&gt;" in page
     data = _DATA_RE.search(page).group(1)
     assert "<b>" not in page.replace(data, "")
     assert "<i>" not in page.replace(data, "")
-    assert page.count("<script") == 1
+    assert page.count("<script") == 3
+    assert 'id="theme-toggle"' in page
+    assert 'data-theme="light"' in page  # the light override ships
 
     ui_envelope = embedded(page)
     assert ui_envelope["records"] == [store.query()[0]]
@@ -523,3 +526,15 @@ def test_jlens_records_render_layer_bars(tmp_path):
     assert "Layer 4" in page and "Layer 5" in page
     assert "Jacobian lens" in page
     assert "bar-fill" in page
+
+
+def test_dark_theme_is_default_and_toggle_persists(tmp_path):
+    store = seeded_store(tmp_path, [bdh_record()])
+
+    status, page = ui_call(store, "query_results")
+
+    assert status == 200
+    # dark variables live on :root (no data-theme attribute needed);
+    # localStorage key carries the choice across pages
+    assert "--bg:#0d1117" in page.replace(" ", "")
+    assert "skald-theme" in page
