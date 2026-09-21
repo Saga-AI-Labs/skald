@@ -348,13 +348,15 @@ def test_unknown_view_is_404_and_non_get_is_405(tmp_path):
     assert "only GET" in page
 
 
-def test_root_redirects_to_browsing_entry_point(tmp_path):
+def test_root_is_a_landing_page(tmp_path):
     store = seeded_store(tmp_path, [bdh_record()])
 
     status, body = render_page("GET", "/", {}, store)
 
-    assert status == 302
-    assert body == ""
+    assert status == 200
+    assert "Skald" in body
+    assert view_path("query_results") in body
+    assert "bdh_cl" in body
 
 
 # --- end-to-end over a real socket --------------------------------------------
@@ -427,3 +429,85 @@ def test_live_default_store_render_smoke():
     ui_envelope = embedded(page)
     assert ui_envelope["anomalies"] == flag_anomalies(store.query())
     assert ui_envelope["count"] == len(ui_envelope["records"])
+
+# --- human readability: names, dropdowns, landing, jlens viz -----------------
+
+
+def test_model_names_render_instead_of_bare_hashes(tmp_path, monkeypatch):
+    import ui.app as ui_app
+
+    store = seeded_store(tmp_path, [bdh_record()])
+    monkeypatch.setattr(
+        ui_app, "load_directory",
+        lambda: {"21ec6c220714fac44af5d8a15aa186821596254d2999503c587528adc7590000": __import__("identity.names", fromlist=["ModelName"]).ModelName(
+            sha256="21ec6c220714fac44af5d8a15aa186821596254d2999503c587528adc7590000",
+            name="Test Model", description="A test.", kind="weights")},
+    )
+    status, page = ui_call(store, "query_results", "task=router")
+
+    assert status == 200
+    assert "Test Model" in page
+
+
+def test_unknown_models_are_explicitly_unnamed(tmp_path, monkeypatch):
+    import ui.app as ui_app
+
+    store = seeded_store(tmp_path, [bdh_record()])
+    monkeypatch.setattr(ui_app, "load_directory", lambda: {})
+
+    status, page = ui_call(store, "query_results", "task=router")
+
+    assert status == 200
+    assert "(unnamed)" in page
+
+
+def test_filter_dimensions_render_as_dropdowns(tmp_path):
+    store = seeded_store(tmp_path, [bdh_record(), pi50_record()])
+
+    status, page = ui_call(store, "query_results")
+
+    assert status == 200
+    assert '<select name="adapter"' in page
+    assert '<option value="bdh_cl"' in page
+    assert '<option value="pi50"' in page
+    assert '<select name="task"' in page
+    # help text comes from the spec descriptions, not from folklore
+    assert "Adapter name of the benchmark family" in page
+
+
+def test_landing_page_explains_and_links(tmp_path):
+    store = seeded_store(tmp_path, [bdh_record()])
+
+    status, page = render_page("GET", "/", {}, store)
+
+    assert status == 200
+    assert "consolidated" in page.lower()
+    for op_id in get_operation_ids():
+        assert view_path(op_id) in page
+
+
+def test_jlens_records_render_layer_bars(tmp_path):
+    def jlens_record(layer, rank, prob):
+        return {
+            "model_checkpoint_sha256": "b" * 64,
+            "adapter": "jlens",
+            "suite": "jlens",
+            "task": "layer_readout",
+            "metric": f"top{rank}_prob@L{layer}",
+            "value": prob,
+            "n": 1,
+            "protocol": "jlens wiring check",
+            "seed": 42,
+        }
+
+    store = seeded_store(
+        tmp_path,
+        [jlens_record(4, 1, 0.63), jlens_record(4, 2, 0.27),
+         jlens_record(5, 1, 0.5)],
+    )
+    status, page = ui_call(store, "query_results")
+
+    assert status == 200
+    assert "Layer 4" in page and "Layer 5" in page
+    assert "Jacobian lens" in page
+    assert "bar-fill" in page

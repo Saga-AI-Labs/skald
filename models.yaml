@@ -1,0 +1,51 @@
+# Model directory: human names for checkpoint identities.
+#
+# Every Skald record is keyed by a SHA-256 (weighed-in checkpoints) or an
+# endpoint-identity hash (served models). This file maps known identities to
+# the names humans use, so surfaces can render "Qwen3.8-Flash-Next
+# (abliterated)" instead of "cbe78dd270cd…". Unknown hashes render as their
+# 12-char prefix plus "(unnamed)" — never silently, and anyone can add an
+# entry via pull request.
+#
+# Fields per entry:
+#   sha256:      the full model_checkpoint_sha256 as stored in records
+#   name:        short human name, shown in tables and dropdowns
+#   description: one line on what this is (variant, provenance, caveats)
+#   kind:        weights | endpoint   (endpoint = UNVERIFIED served-model
+#                identity, not a weight hash — see the openai_compat adapter)
+
+models:
+  - sha256: cbe78dd270cd0420b20fe2b8d8189198434cdc7c8dade41ad316b591ed4a71e0
+    name: Qwen3.8-Flash-Next (abliterated)
+    description: Refusal-ablated variant (snapshot b3b60a4c); edit confined to mid-to-late attn o_proj (atlas hotspots L15-47)
+    kind: weights
+
+  - sha256: 7f55edf2c1b7476a21492b3efe17a3321c2c4539bca2ee645f5825e12e13c35c
+    name: Qwen3.8-Flash-Next (stock)
+    description: Stock twin (snapshot 925d7be6); served on :8888 during the September evals
+    kind: weights
+
+  - sha256: 00f39f2e7105b8d9888b1a9dff2c366161816b952e662ef4cb40bfca81055820
+    name: qwen3.8-flash-next @ :8888 (unverified endpoint)
+    description: Served-model identity (self-reported name); arm ambiguous across runs — see September notes before citing
+    kind: endpoint
+
+  - sha256: 888d54d81cbf2a044f5ede2e7611c83685bb85fa91fd5190196464d02a65f2ab
+    name: Huihui-gemma-3-270m-it-abliterated
+    description: Abliterated Gemma-3 270M (M4 JLens wiring-check target)
+    kind: weights
+
+  - sha256: 11a0d2fc439a8e511804f910ed97cafebce658bfae1c4d4348ca5536a757e0a6
+    name: tiny-gpt2 (smoke-test model)
+    description: Stock tiny GPT-2 under .skald/saga_models; scores ~0 everywhere, used for wiring proofs only
+    kind: weights
+
+  - sha256: 21ec6c220714fac44af5d8a15aa186821596254d2999503c587528adc7596825
+    name: BDH wikitext-2 checkpoint (bdh_cl demo)
+    description: Grown BDH checkpoint behind the bdh_cl router/domain records
+    kind: weights
+
+  - sha256: c6b0902f4b223656689af3d89ff3ea2642ccbffd73b5c6563acd0a8ef6162b0c
+    name: PHASE1-MANIFEST.md (pi50 manifest artifact)
+    description: Not a model — hash of the evaluated manifest file for manifest_check records
+    kind: weights

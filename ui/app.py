@@ -9,11 +9,17 @@ parameters and the same coercion rules, so the UI exposes the same functional
 surface as the API by construction.
 
 URL scheme: one GET view per operation at ``/ui/v1/<operation.id>`` (e.g.
-``/ui/v1/query_results``); ``/`` redirects to the result-browsing entry point
-(``list_suites_adapters``).  Request parameters are the operation's declared
-request params carried as query-string pairs; every filterable parameter is an
-equality filter passed straight to ``store.query`` — identical semantics to the
-API.
+``/ui/v1/query_results``); ``/`` is a landing page explaining the app.  Request
+parameters are the operation's declared request params carried as
+query-string pairs; every filterable parameter is an equality filter passed
+straight to ``store.query`` — identical semantics to the API.
+
+Checkpoint hashes render through the ``models.yaml`` name directory
+(``identity.names``): known models show human names, unknown ones an
+explicit "(unnamed)" stub.  Names are presentation-only — the embedded
+data block carries the same canonical records unchanged, so API/UI
+envelope parity holds by construction.
+
 
 Every page embeds the exact record envelope the API returns for the same query
 (as an ``application/json`` script block, ``id="skald-surface-data"``), so
@@ -35,11 +41,13 @@ import html
 import json
 import logging
 import math
+import re
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from store.schema import RECORD_FIELDS
+from identity.names import display_name, load_directory, resolve
 from surfaces.spec import (
     OPERATIONS,
     SPEC_ID,
@@ -272,7 +280,7 @@ def _drilldown_link(record: dict[str, Any]) -> str:
 
 
 def _nav(active_id: str) -> str:
-    items = []
+    items = [f'<a href="/" title="What Skald is and where to start">home</a>']
     for op in OPERATIONS:
         cls = " class=active" if op.id == active_id else ""
         items.append(
@@ -282,23 +290,126 @@ def _nav(active_id: str) -> str:
     return '<nav role="navigation">' + "\n".join(items) + "</nav>"
 
 
-def _filter_form(operation, values: dict[str, Any]) -> str:
+def _distinct_options(store) -> dict[str, list[str]]:
+    """Sorted distinct values per filterable dimension, from live records."""
+    options: dict[str, set[str]] = {}
+    try:
+        records = store.query()
+    except Exception:  # noqa: BLE001 - empty/broken store renders empty selects
+        records = []
+    for record in records:
+        for field in (
+            "adapter", "suite", "task", "metric", "model_checkpoint_sha256",
+            "protocol", "host",
+        ):
+            options.setdefault(field, set()).add(str(record.get(field)))
+    return {field: sorted(values) for field, values in options.items()}
+
+
+def _landing(store) -> tuple[int, str]:
+    """The home page: what Skald is, known models, entry points."""
+    from surfaces.spec import get_operation as _get_op
+
+    try:
+        records = store.query()
+    except Exception:  # noqa: BLE001
+        records = []
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record.get("adapter", "?")] = counts.get(record.get("adapter", "?"), 0) + 1
+    directory = load_directory()
+    seen_hashes = sorted({str(r.get("model_checkpoint_sha256")) for r in records})
+    model_rows = []
+    for sha in seen_hashes:
+        entry = resolve(sha, directory)
+        model_rows.append(
+            f"<tr><td>{_esc(entry.name)}</td>"
+            f'<td class="mono">{_esc(sha[:12])}…</td>'
+            f"<td>{_esc(entry.kind)}</td>"
+            f"<td>{_esc(entry.description)}</td></tr>"
+        )
+    cards = []
+    for op in OPERATIONS:
+        cards.append(
+            f'<li><a href="{_esc(view_path(op.id))}">{_esc(op.id)}</a> — '
+            f"{_esc(op.summary)}</li>"
+        )
+    counts_text = (
+        ", ".join(f"{adapter}: {n}" for adapter, n in sorted(counts.items()))
+        or "store is empty"
+    )
+    content = f"""<h2>Skald — consolidated local evaluation</h2>
+<p>One result store behind two equivalent surfaces (this UI and the JSON API).
+Every benchmark family writes the same record shape; comparisons are queries.
+Pick a view below, or start from a model.</p>
+<p class="meta">Store holds {len(records)} records ({_esc(counts_text)}).</p>
+<h3>Views</h3><ul>{"".join(cards)}</ul>
+<h3>Models in this store</h3>
+<table><thead><tr><th>Model</th><th>Checkpoint</th><th>Kind</th><th>What it is</th></tr></thead>
+<tbody>{"".join(model_rows) or '<tr><td colspan="4">No records yet.</td></tr>'}</tbody></table>
+<p class="meta">Names come from <code>models.yaml</code> in the repo root —
+hashes without an entry render as "(unnamed)". JLens layer readouts render
+as per-layer bars on their drilldown pages.</p>"""
+    operation = _get_op("list_suites_adapters")
+    return 200, _document("Skald — home", operation, content, {})
+
+
+def _filter_form(operation, values: dict[str, Any],
+                 options: dict[str, list[str]] | None = None,
+                 directory: dict | None = None) -> str:
+    """One input per declared request parameter.
+
+    Dimensions backed by live store values (adapter, suite, task, metric,
+    checkpoint, protocol, host) render as dropdowns — no guessing identifiers.
+    Free dimensions keep text/number inputs. Every field carries its spec
+    description as help text.
+    """
+    options = options or {}
     fields = []
     for param in operation.request:
         kind = param.kind
-        input_type = "number" if kind in ("number", "int") else "text"
         current = values.get(param.name)
         if isinstance(current, bool):
             current = ""
-        value_attr = "" if current is None else f' value="{_esc(str(current))}"'
+        current_text = "" if current is None else str(current)
         required = " required" if param.required else ""
+        help_text = (
+            f'<small class="help">{_esc(param.description)}</small>'
+        )
+        choices = options.get(param.name)
+        if choices:
+            opts = []
+            if not param.required:
+                opts.append("<option value=\"\">— any —</option>")
+            for choice in choices:
+                selected = " selected" if choice == current_text else ""
+                if param.name == "model_checkpoint_sha256":
+                    label = display_name(choice, directory)
+                else:
+                    label = choice if len(choice) <= 90 else choice[:87] + "…"
+                opts.append(
+                    f'<option value="{_esc(choice)}"{selected}>'
+                    f"{_esc(label)}</option>"
+                )
+            control = (
+                f'<select name="{_esc(param.name)}" id="{_esc(param.name)}"'
+                f"{required}>" + "".join(opts) + "</select>"
+            )
+        else:
+            input_type = "number" if kind in ("number", "int") else "text"
+            value_attr = (
+                "" if current is None else f' value="{_esc(str(current))}"'
+            )
+            control = (
+                f'<input name="{_esc(param.name)}" id="{_esc(param.name)}" '
+                f'type="{input_type}"{value_attr}{required} '
+                f'title="{_esc(param.description)}">'
+            )
         fields.append(
             f'<div class="field">'
             f'<label for="{_esc(param.name)}">{_esc(param.name)}'
             f'{"*" if param.required else ""}</label>'
-            f'<input name="{_esc(param.name)}" id="{_esc(param.name)}" '
-            f'type="{input_type}"{value_attr}{required} '
-            f'title="{_esc(param.description)}">'
+            f"{control}{help_text}"
             f"</div>"
         )
     return (
@@ -310,24 +421,88 @@ def _filter_form(operation, values: dict[str, Any]) -> str:
     )
 
 
-def _records_table(records: list[dict[str, Any]]) -> str:
+def _records_table(records: list[dict[str, Any]],
+                   directory: dict | None = None) -> str:
+    """Full canonical table (every RECORD_FIELDS column, per the parity test)
+    led by a human Model column; long protocols clamp via CSS with the full
+    text on hover so nothing is hidden, only shortened on screen."""
     if not records:
         return '<p class="empty">No records.</p>'
-    header = "".join(f"<th>{_esc(field)}</th>" for field in RECORD_FIELDS)
+    header = "<th>Model</th>" + "".join(
+        f"<th>{_esc(field)}</th>" for field in RECORD_FIELDS
+    )
     rows = []
     for record in records:
-        cells = []
+        sha = str(record["model_checkpoint_sha256"])
+        model_cell = (
+            f'<td class="modelname"><a href="{_esc(_drilldown_link(record))}" '
+            f'title="{_esc(sha)}">{_esc(display_name(sha, directory))}</a></td>'
+        )
+        cells = [model_cell]
         for field in RECORD_FIELDS:
             text = _fmt(record[field])
             if field == "model_checkpoint_sha256":
-                cell = f'<td class="mono"><a href="{_esc(_drilldown_link(record))}">{_esc(text)}</a></td>'
+                cell = (
+                    f'<td class="mono"><a href="{_esc(_drilldown_link(record))}" '
+                    f'title="{_esc(text)}">{_esc(text[:12])}…</a></td>'
+                )
             elif field == "task":
                 cell = f'<td><a href="{_esc(_drilldown_link(record))}">{_esc(text)}</a></td>'
+            elif field == "protocol":
+                cell = (
+                    f'<td class="proto" title="{_esc(text)}">{_esc(text)}</td>'
+                )
             else:
                 cell = f"<td>{_esc(text)}</td>"
             cells.append(cell)
         rows.append("<tr>" + "".join(cells) + "</tr>")
     return "<table><thead><tr>" + header + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+
+
+_JLENS_METRIC_RE = re.compile(r"^top(\d+)_prob@L(\d+)$")
+
+
+def _jlens_viz(records: list[dict[str, Any]]) -> str:
+    """Per-layer top-k readout bars for JLens records, with an explainer.
+
+    The Jacobian lens transports an early layer's residual into the final
+    layer's basis and decodes it with the model's own unembedding: each bar
+    is the probability the layer's state assigns to that token — what the
+    layer is "disposed to say". Bars share a 0–1 scale so layers are
+    comparable; layers are ordered numerically.
+    """
+    by_layer: dict[int, list[tuple[int, float]]] = {}
+    for record in records:
+        m = _JLENS_METRIC_RE.match(str(record.get("metric", "")))
+        if m is None:
+            continue
+        rank, layer = int(m.group(1)), int(m.group(2))
+        try:
+            prob = float(record.get("value"))
+        except (TypeError, ValueError):
+            continue
+        by_layer.setdefault(layer, []).append((rank, prob))
+    if not by_layer:
+        return ""
+    parts = [
+        "<h3>Layer readout</h3>"
+        '<p class="meta">What each layer is disposed to say, per the '
+        "Jacobian lens (Anthropic, via Neuronpedia — see CREDITS.md): "
+        "top predicted tokens and their probabilities, 0–1 scale shared "
+        "across layers. A sharp top-1 means the layer already speaks; a "
+        "flat spread means it does not.</p>"
+    ]
+    for layer in sorted(by_layer):
+        rows = sorted(by_layer[layer])
+        bars = "".join(
+            f'<div class="bar-row"><span class="bar-rank">#{rank}</span>'
+            f'<span class="bar-track"><span class="bar-fill" '
+            f'style="width:{max(0.0, min(1.0, prob)) * 100:.1f}%"></span></span>'
+            f'<span class="bar-val">{prob:.4f}</span></div>'
+            for rank, prob in rows
+        )
+        parts.append(f"<h4>Layer {layer}</h4>{bars}")
+    return "".join(parts)
 
 
 def _active_filters_summary(operation, values: dict[str, Any]) -> str:
@@ -345,7 +520,10 @@ def _active_filters_summary(operation, values: dict[str, Any]) -> str:
     return f'<p class="meta">active filters: {chips}</p>'
 
 
-def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any]) -> str:
+def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any],
+                  store=None) -> str:
+    directory = load_directory()
+    options = _distinct_options(store) if store is not None else {}
     parts = [f"<h2>{_esc(operation.summary)}</h2>"]
     op_id = operation.id
     if op_id == "task_drilldown":
@@ -354,6 +532,12 @@ def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any]) -
             f'<code>{_esc(envelope["model_checkpoint_sha256"])}</code> '
             f'· task <code>{_esc(envelope["task"])}</code> '
             f'· {envelope["count"]} record{"s" if envelope["count"] != 1 else ""}</p>'
+        )
+        entry = resolve(envelope["model_checkpoint_sha256"], directory)
+        parts.append(
+            f'<div class="modelcard"><strong>{_esc(entry.name)}</strong> '
+            f'<span class="kind">{_esc(entry.kind)}</span><br>'
+            f'<span class="meta">{_esc(entry.description)}</span></div>'
         )
     elif op_id == "query_results":
         parts.append(
@@ -368,9 +552,10 @@ def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any]) -
             f"cross-protocol checkpoints</p>"
         )
         cards = [
-            f'<li class="anomaly"><a class="mono" '
+            f'<li class="anomaly"><a '
             f'href="{_esc(_filter_link("model_checkpoint_sha256", a["model_checkpoint_sha256"]))}">'
-            f'{_esc(a["model_checkpoint_sha256"])}</a> — '
+            f'{_esc(display_name(a["model_checkpoint_sha256"], directory))}</a> '
+            f'<span class="mono">{_esc(a["model_checkpoint_sha256"][:12])}…</span> — '
             f'{a["protocol_count"]} protocols '
             f'({_esc(", ".join(a["protocols"]))})'
             f' · {_esc(a["reason"])}</li>'
@@ -380,9 +565,10 @@ def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any]) -
             parts.append("<h3>Anomalies</h3><ul>" + "".join(cards) + "</ul>")
         else:
             parts.append('<p class="empty">No anomalies under the declared rule.</p>')
-    parts.append(_filter_form(operation, values))
+    parts.append(_filter_form(operation, values, options, directory))
     parts.append("<h3>Records</h3>")
-    parts.append(_records_table(envelope["records"]))
+    parts.append(_jlens_viz(envelope["records"]))
+    parts.append(_records_table(envelope["records"], directory))
     return "".join(parts)
 
 
@@ -443,6 +629,18 @@ input,button{{padding:.25rem .4rem;font:inherit}}
 .anomaly{{margin:.35rem 0}}
 .empty{{color:#57606a}}
 .error p{{color:#b35900}}
+td.modelname{{font-weight:bold;white-space:nowrap}}
+td.proto{{max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#57606a}}
+form.filters select{{max-width:44ch;padding:.25rem .4rem;font:inherit}}
+small.help{{display:block;color:#57606a;font-size:12px;max-width:44ch}}
+.modelcard{{border:1px solid #ddd;border-radius:4px;padding:.6rem 1rem;margin:.6rem 0;background:#f6f8fa}}
+.kind{{background:#ddf4ff;border:1px solid #54aeff;border-radius:2em;padding:0 .6rem;font-size:12px}}
+.bar-row{{display:flex;align-items:center;gap:.6rem;margin:.15rem 0;max-width:70ch}}
+.bar-rank{{width:3ch;text-align:right;color:#57606a}}
+.bar-track{{flex:1;background:#eaeef2;border-radius:3px;height:1.1em;overflow:hidden}}
+.bar-fill{{display:block;background:#0969da;height:100%}}
+.bar-val{{width:7ch;font-variant-numeric:tabular-nums}}
+h4{{margin-bottom:.2rem}}
 </style>
 </head>
 <body>
@@ -479,7 +677,7 @@ def render_view(operation_id: str, query: dict[str, list[str]], store) -> tuple[
 
     response = operation.response
     if isinstance(response, RecordsResponse):
-        content = _records_view(operation, values, envelope)
+        content = _records_view(operation, values, envelope, store)
     elif isinstance(response, ValuesResponse):
         content = _values_view(operation, values, envelope)
     else:  # pragma: no cover - spec validation forbids other response kinds
@@ -492,7 +690,7 @@ def render_page(
 ) -> tuple[int, str]:
     """Pure request dispatch: return ``(status, html document)``."""
     if path == "/":
-        return 302, ""
+        return _landing(store)
     operation_id = _PATH_TO_OPERATION.get(path)
     if operation_id is None:
         return _error_document(
