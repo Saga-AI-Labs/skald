@@ -191,6 +191,30 @@ def _filter_parameters() -> tuple[Parameter, ...]:
 
 # --- The one operation set (no per-surface branch) --------------------------
 
+_RUN_ADAPTER = Parameter(
+    name="adapter",
+    kind="string",
+    required=True,
+    description="Adapter name: which benchmark family to run.",
+    filterable=True,
+)
+_RUN_TASK = Parameter(
+    name="task",
+    kind="string",
+    required=True,
+    description="Task name within the adapter's suite.",
+    filterable=True,
+)
+_RUN_MODEL = Parameter(
+    name="model",
+    kind="string",
+    required=True,
+    description="Run target: checkpoint path, endpoint URL, or hash, "
+    "per the adapter's contract. (Named without the store's _checkpoint "
+    "suffix on purpose: this names the run input, not a stored field.)",
+    filterable=False,
+)
+
 OPERATIONS: tuple[Operation, ...] = (
     Operation(
         id="list_suites_adapters",
@@ -267,6 +291,54 @@ OPERATIONS: tuple[Operation, ...] = (
                 "flag_anomalies, and \"count\" the number of records returned."
             ),
             metadata_keys=("count", "anomalies"),
+        ),
+    ),
+    Operation(
+        id="run_benchmark",
+        summary=(
+            "Launch a benchmark run: the named adapter executes the task "
+            "against the model in a background job and persists records to "
+            "this store. Poll job_status until done."
+        ),
+        request=(
+            _RUN_ADAPTER,
+            _RUN_TASK,
+            _RUN_MODEL,
+            Parameter(
+                name="config",
+                kind="string",
+                required=False,
+                description="Adapter config as a JSON object string "
+                "(keys per docs/usage.md); absent means defaults.",
+            ),
+        ),
+        response=ValuesResponse(
+            description="The created job: single-element lists.",
+            value_keys=("job_id", "status"),
+        ),
+    ),
+    Operation(
+        id="job_status",
+        summary=(
+            "Inspect one benchmark job: status (queued/running/done/failed/"
+            "orphaned), what it runs, and — when done — how many records it "
+            "persisted and under which checkpoint. Each key is a "
+            "zero-or-one-element list (empty means absent)."
+        ),
+        request=(
+            Parameter(
+                name="job_id",
+                kind="string",
+                required=True,
+                description="Job id returned by run_benchmark.",
+            ),
+        ),
+        response=ValuesResponse(
+            description="The job descriptor as single-element lists.",
+            value_keys=(
+                "job_id", "status", "adapter", "task", "model",
+                "record_count", "checkpoint", "error",
+            ),
         ),
     ),
 )

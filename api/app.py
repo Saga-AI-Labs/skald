@@ -3,12 +3,15 @@
 The endpoint set is not hand-maintained: every route below is generated from
 ``surfaces.spec.OPERATIONS`` at import time, so a capability added to the
 shared spec appears here automatically (and the parity test locks this in).
-All responses are read-only queries over the unified store — no writes, no
-cloud LLM anywhere in the chain.
+Query operations are read-only over the unified store; ``run_benchmark``
+launches a background benchmark job (equivalent to the adapter CLI) whose
+records land in the same store — no cloud LLM anywhere in the chain.
 
 URL scheme: one GET endpoint per operation at ``/api/v1/<operation.id>``
-(e.g. ``/api/v1/query_results``).  Request parameters are the operation's
-declared request params carried as query-string pairs; every filterable
+(e.g. ``/api/v1/query_results``), except ``run_benchmark`` which is POST
+with a JSON body ``{"adapter": ..., "task": ..., "model": ...,
+"config": {...}}``.  Request parameters are the operation's declared
+request params carried as query-string pairs; every filterable
 parameter is an equality filter passed straight to ``store.query``.
 
 Response envelope for record-carrying operations (spec ``RecordsResponse``):
@@ -37,10 +40,12 @@ import json
 import logging
 import math
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from store.schema import FILTERABLE
+from jobs import JobError, registry_for_store
 from surfaces.spec import (
     OPERATIONS,
     SPEC_ID,
@@ -182,7 +187,59 @@ _HANDLERS: dict[str, Callable[..., tuple[dict[str, Any], list | None]]] = {
     "query_results": _query_records,
     "task_drilldown": _task_drilldown,
     "list_anomalies": _list_anomalies,
+    "run_benchmark": None,  # wired below (needs the job registry)
+    "job_status": None,
 }
+
+
+def _registry_for(store):
+    return registry_for_store(store)
+
+
+def _run_benchmark(operation, values, store) -> tuple[dict[str, Any], None]:
+    config_raw = values.get("config")
+    if config_raw is None:
+        config = {}
+    else:
+        try:
+            config = json.loads(config_raw)
+        except ValueError as exc:
+            raise ApiError(400, f"parameter 'config' must be a JSON object: {exc}") from exc
+        if not isinstance(config, dict):
+            raise ApiError(400, "parameter 'config' must be a JSON object")
+    try:
+        job = _registry_for(store).submit(
+            values["adapter"], values["task"], values["model"], config
+        )
+    except JobError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return {"job_id": [job["job_id"]], "status": [job["status"]]}, None
+
+
+def _job_status(operation, values, store) -> tuple[dict[str, Any], None]:
+    try:
+        job = _registry_for(store).get(values["job_id"])
+    except KeyError as exc:
+        raise ApiError(404, f"unknown job {values['job_id']!r}") from exc
+    single = lambda v: [] if v is None else [v]  # noqa: E731
+    return {
+        "job_id": [job["job_id"]],
+        "status": [job["status"]],
+        "adapter": [job["adapter"]],
+        "task": [job["task"]],
+        "model": [job["model"]],
+        "record_count": [job["record_count"]],
+        "checkpoint": single(job["checkpoint"]),
+        "error": single(job["error"]),
+    }, None
+
+
+_HANDLERS["run_benchmark"] = _run_benchmark
+_HANDLERS["job_status"] = _job_status
+
+
+def _registry_for(store):
+    return registry_for_store(store)
 
 
 def _envelope(operation, metadata: dict[str, Any], records: list | None) -> dict:
@@ -226,13 +283,41 @@ def error_body(message: str, operation_id: str | None = None) -> dict[str, Any]:
     return body
 
 
-def dispatch(method: str, path: str, query: dict[str, list[str]], store):
-    """Pure request dispatch: return ``(status, json-serializable body)``."""
+def dispatch(method: str, path: str, query: dict[str, list[str]], store,
+               body: bytes | None = None):
+    """Pure request dispatch: return ``(status, json-serializable body)``.
+
+    GET/HEAD carry parameters in *query*; POST carries a JSON object body
+    (``run_benchmark`` only — every other endpoint is GET).
+    """
     operation_id = _PATH_TO_OPERATION.get(path)
     if operation_id is None:
         return 404, error_body("unknown endpoint; available: "
                                f"{sorted(operation_routes().values())}")
-    if method not in ("GET", "HEAD"):
+    if method == "POST":
+        if operation_id != "run_benchmark":
+            return 405, error_body("only run_benchmark accepts POST", operation_id)
+        try:
+            payload = json.loads((body or b"{}").decode("utf-8"))
+        except ValueError as exc:
+            return 400, error_body(f"POST body must be JSON: {exc}", operation_id)
+        if not isinstance(payload, dict):
+            return 400, error_body("POST body must be a JSON object", operation_id)
+        # Fold the JSON body into the spec's query-string shape (one string
+        # or list of strings per parameter); the config object travels as a
+        # JSON string into the spec's string param.
+        query = {}
+        for key, value in payload.items():
+            if key == "config" and isinstance(value, dict):
+                query[key] = [json.dumps(value)]
+            elif isinstance(value, list):
+                query[key] = [v if isinstance(v, str) else json.dumps(v)
+                              for v in value]
+            elif isinstance(value, str):
+                query[key] = [value]
+            else:
+                query[key] = [json.dumps(value)]
+    elif method not in ("GET", "HEAD"):
         return 405, error_body("only GET is supported on this endpoint", operation_id)
     try:
         return 200, execute_operation(operation_id, query, store)
@@ -249,23 +334,30 @@ def make_handler(
     """Build a request handler class backed by *store_resolver*'s store."""
 
     class Handler(BaseHTTPRequestHandler):
-        """Minimal GET/HEAD JSON server over the spec-derived routes."""
+        """Minimal GET/HEAD/POST JSON server over the spec-derived routes."""
 
         def do_GET(self) -> None:
-            self._handle(head_only=False)
+            self._handle("GET")
 
         def do_HEAD(self) -> None:
-            self._handle(head_only=True)
+            self._handle("HEAD")
 
-        def _handle(self, head_only: bool) -> None:
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            self._handle("POST", body=body)
+
+        def _handle(self, method: str, body: bytes | None = None) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
+            head_only = method == "HEAD"
             try:
                 status, body = dispatch(
-                    "HEAD" if head_only else "GET",
+                    method,
                     parsed.path,
                     query,
                     store_resolver(),
+                    body=body,
                 )
             except Exception as exc:  # pragma: no cover - dispatch is total
                 logger.error("unhandled dispatch failure: %r", exc)

@@ -22,6 +22,8 @@ def test_operation_set_is_non_empty_and_stable():
         "query_results",
         "task_drilldown",
         "list_anomalies",
+        "run_benchmark",
+        "job_status",
     )
     assert len(spec.OPERATIONS) == len(set(spec.get_operation_ids()))
 

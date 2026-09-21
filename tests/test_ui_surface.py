@@ -129,6 +129,8 @@ def test_view_set_equals_spec_operation_set(tmp_path):
         assert view_path(op_id).startswith("/ui/v1/")
 
     # Every registered view actually renders a complete page.
+    # (run_benchmark renders its submission form on a bare GET; job_status
+    # needs a job id, so a bare GET is a 400 naming it.)
     for op_id, path in views.items():
         if op_id == "task_drilldown":
             status, body = render_page(
@@ -137,6 +139,16 @@ def test_view_set_equals_spec_operation_set(tmp_path):
                 {"model_checkpoint_sha256": [CKPT_BDH], "task": ["router"]},
                 store,
             )
+        elif op_id == "run_benchmark":
+            status, body = render_page("GET", path, {}, store)
+            assert status == 200, (op_id, body[:200])
+            assert "Run benchmark" in body
+            continue
+        elif op_id == "job_status":
+            status, body = render_page("GET", path, {}, store)
+            assert status == 400, (op_id, body[:200])
+            assert "job_id" in body
+            continue
         else:
             status, body = render_page("GET", path, {}, store)
         assert status == 200, (op_id, body[:200])
@@ -345,7 +357,7 @@ def test_unknown_view_is_404_and_non_get_is_405(tmp_path):
 
     status, page = render_page("POST", view_path("query_results"), {}, store)
     assert status == 405
-    assert "only GET" in page
+    assert "only the run form accepts POST" in page
 
 
 def test_root_is_a_landing_page(tmp_path):

@@ -115,6 +115,8 @@ def test_endpoint_set_equals_spec_operation_set(tmp_path):
         assert endpoint_path(op_id).startswith("/api/v1/")
 
     # Every registered endpoint actually answers with a spec response.
+    # (run_benchmark and job_status need submission parameters, so a bare
+    # GET is a 400 naming them — covered with real submissions below.)
     for op_id, path in routes.items():
         if op_id == "task_drilldown":
             status, body = dispatch(
@@ -125,6 +127,10 @@ def test_endpoint_set_equals_spec_operation_set(tmp_path):
                 },
                 store,
             )
+        elif op_id in ("run_benchmark", "job_status"):
+            status, body = dispatch("GET", path, {}, store)
+            assert status == 400, (op_id, body)
+            continue
         else:
             status, body = dispatch("GET", path, {}, store)
         assert status == 200, (op_id, body)

@@ -48,6 +48,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from store.schema import RECORD_FIELDS
 from identity.names import display_name, load_directory, resolve
+from jobs import adapter_tasks, registry_for_store
+from jobs import JobError as _JobError
 from surfaces.spec import (
     OPERATIONS,
     SPEC_ID,
@@ -356,7 +358,8 @@ as per-layer bars on their drilldown pages.</p>"""
 
 def _filter_form(operation, values: dict[str, Any],
                  options: dict[str, list[str]] | None = None,
-                 directory: dict | None = None) -> str:
+                 directory: dict | None = None,
+                 method: str = "get") -> str:
     """One input per declared request parameter.
 
     Dimensions backed by live store values (adapter, suite, task, metric,
@@ -377,7 +380,15 @@ def _filter_form(operation, values: dict[str, Any],
             f'<small class="help">{_esc(param.description)}</small>'
         )
         choices = options.get(param.name)
-        if choices:
+        if param.name == "config":
+            # Free-form JSON object; a single-line input would hide mistakes.
+            current_json = current_text
+            control = (
+                f'<textarea name="{_esc(param.name)}" id="{_esc(param.name)}" '
+                f'rows="4" cols="48" placeholder=\'{{"max_samples": 20}}\' '
+                f'title="{_esc(param.description)}">{_esc(current_json)}</textarea>'
+            )
+        elif choices:
             opts = []
             if not param.required:
                 opts.append("<option value=\"\">— any —</option>")
@@ -413,10 +424,12 @@ def _filter_form(operation, values: dict[str, Any],
             f"</div>"
         )
     return (
-        f'<form class="filters" method="get" '
+        f'<form class="filters" method="{method}" '
         f'action="{_esc(view_path(operation.id))}">'
         + "".join(fields)
-        + '<button type="submit">Query</button>'
+        + '<button type="submit">'
+        + ("Run benchmark" if method == "post" else "Query")
+        + "</button>"
         + "</form>"
     )
 
@@ -662,11 +675,107 @@ def _error_document(status: int, message: str) -> tuple[int, str]:
     return status, page
 
 
+def _run_form_options() -> dict[str, list[str]]:
+    """Adapter/task dropdown values for the run form (from the registry)."""
+    tasks = adapter_tasks()
+    all_tasks = sorted({task for names in tasks.values() for task in names})
+    return {"adapter": sorted(tasks), "task": all_tasks}
+
+
+def _job_page(operation, job: dict[str, Any], store,
+              notice: str = "") -> tuple[int, str]:
+    """Status page for one benchmark job (pure; no socket)."""
+    status = job["status"]
+    rows = [
+        ("Job", job["job_id"]),
+        ("Status", status),
+        ("Adapter", job["adapter"]),
+        ("Task", job["task"]),
+        ("Model", job["model"]),
+        ("Records persisted", str(job["record_count"])),
+    ]
+    if job.get("checkpoint"):
+        rows.append(("Checkpoint", job["checkpoint"]))
+    if job.get("error"):
+        rows.append(("Error", job["error"]))
+    body_rows = "".join(
+        f"<tr><th>{_esc(k)}</th><td>{_esc(v)}</td></tr>" for k, v in rows
+    )
+    extra = ""
+    if notice:
+        extra += f'<p class="meta">{_esc(notice)}</p>'
+    if status in ("queued", "running"):
+        extra += (
+            '<p class="meta">The benchmark is still running — '
+            '<a href="">reload</a> to refresh. Long runs survive in the '
+            "background; closing this page does not stop them.</p>"
+        )
+    elif status == "done" and job.get("checkpoint"):
+        query = urlencode(
+            {"model_checkpoint_sha256": job["checkpoint"], "task": job["task"]}
+        )
+        extra += (
+            f'<p><a href="{_esc(view_path("task_drilldown"))}?{query}">'
+            "View the persisted records</a></p>"
+        )
+    elif status == "failed":
+        extra += (
+            "<p>Fix the input and resubmit from the "
+            f'<a href="{_esc(view_path("run_benchmark"))}">run form</a>.</p>'
+        )
+    elif status == "orphaned":
+        extra += "<p>Resubmit from the run form to retry.</p>"
+    content = (
+        f"<h2>Benchmark job { _esc(job['job_id'])}</h2>"
+        f"<table><tbody>{body_rows}</tbody></table>{extra}"
+    )
+    return 200, _document(
+        f"Skald UI — job {job['job_id']}", operation, content,
+        _job_envelope(operation, job),
+    )
+
+
+def _job_envelope(operation, job: dict[str, Any]) -> dict[str, Any]:
+    """The API-equivalent job_status envelope for one job record."""
+    single = lambda v: [] if v is None else [v]  # noqa: E731
+    return {
+        "spec_id": SPEC_ID,
+        "spec_version": SPEC_VERSION,
+        "operation": operation.id,
+        "job_id": [job["job_id"]],
+        "status": [job["status"]],
+        "adapter": [job["adapter"]],
+        "task": [job["task"]],
+        "model": [job["model"]],
+        "record_count": [job["record_count"]],
+        "checkpoint": single(job["checkpoint"]),
+        "error": single(job["error"]),
+    }
+
+
 def render_view(operation_id: str, query: dict[str, list[str]], store) -> tuple[int, str]:
     """Build the full HTML document for one spec operation (pure; no socket)."""
     try:
         operation = get_operation(operation_id)
+        if operation_id == "run_benchmark" and not any(
+            key in query for key in ("adapter", "task", "model")
+        ):
+            # Bare GET: the run form, not an error. Submission is POST.
+            content = (
+                f"<h2>{_esc(operation.summary)}</h2>"
+                '<p class="meta">Pick an adapter and task, name the run '
+                "target per that adapter's contract (checkpoint path, "
+                "endpoint URL, or hash), and add config as a JSON object. "
+                "The run executes in the background; its records land in "
+                "this store like any adapter CLI run.</p>"
+                + _filter_form(operation, {}, _run_form_options(),
+                               load_directory(), method="post")
+            )
+            return 200, _document("Skald UI — run a benchmark", operation,
+                                  content, {})
         values = parse_request(operation, query)
+        if operation_id in ("run_benchmark", "job_status"):
+            return _submit_or_status(operation, operation_id, values, store)
         metadata, records = _run(operation, values, store)
         envelope = _envelope(operation, metadata, records)
     except UiError as exc:
@@ -685,10 +794,44 @@ def render_view(operation_id: str, query: dict[str, list[str]], store) -> tuple[
     return 200, _document(f"Skald UI — {operation.id}", operation, content, envelope)
 
 
+def _submit_or_status(operation, operation_id: str,
+                      values: dict[str, Any], store) -> tuple[int, str]:
+    """Execute the run_benchmark / job_status operations for the UI."""
+    registry = registry_for_store(store)
+    if operation_id == "run_benchmark":
+        config_raw = values.get("config")
+        try:
+            config = json.loads(config_raw) if config_raw else {}
+        except ValueError:
+            raise UiError(400, "parameter 'config' must be a JSON object") from None
+        if not isinstance(config, dict):
+            raise UiError(400, "parameter 'config' must be a JSON object")
+        try:
+            job = registry.submit(
+                values["adapter"], values["task"], values["model"], config
+            )
+        except _JobError as exc:
+            raise UiError(400, str(exc)) from exc
+        return _job_page(
+            operation, registry.get(job["job_id"]), store,
+            notice="Run submitted — this page tracks it to completion.",
+        )
+    try:
+        job = registry.get(values["job_id"])
+    except KeyError as exc:
+        raise UiError(404, f"unknown job {values['job_id']!r}") from exc
+    return _job_page(operation, job, store)
+
+
 def render_page(
-    method: str, path: str, query: dict[str, list[str]], store
+    method: str, path: str, query: dict[str, list[str]], store,
+    body: bytes | None = None,
 ) -> tuple[int, str]:
-    """Pure request dispatch: return ``(status, html document)``."""
+    """Pure request dispatch: return ``(status, html document)``.
+
+    GET/HEAD carry parameters in *query*; POST carries a form-encoded body
+    (the run form only — every other view is GET).
+    """
     if path == "/":
         return _landing(store)
     operation_id = _PATH_TO_OPERATION.get(path)
@@ -697,9 +840,20 @@ def render_page(
             404,
             "unknown view; available: " f"{sorted(view_routes().values())}",
         )
+    if method == "POST":
+        if operation_id != "run_benchmark":
+            return _error_document(
+                405, "only the run form accepts POST"
+            )
+        try:
+            form = parse_qs((body or b"").decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return _error_document(400, "unreadable form body")
+        return render_view(operation_id, form, store)
     if method not in ("GET", "HEAD"):
         return _error_document(
-            405, "only GET is supported on this view (HEAD sends headers only)"
+            405, "views are GET (HEAD sends headers only); only the run "
+            "form accepts POST"
         )
     return render_view(operation_id, query, store)
 
@@ -715,32 +869,36 @@ def make_handler(
         server_version = "SkaldUI/1.0"
 
         def do_GET(self) -> None:
-            self._handle(head_only=False)
+            self._handle("GET")
 
         def do_HEAD(self) -> None:
-            self._handle(head_only=True)
+            self._handle("HEAD")
 
-        def _handle(self, head_only: bool) -> None:
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length > 0 else b""
+            self._handle("POST", body=body)
+
+        def _handle(self, method: str, body: bytes | None = None) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             try:
                 status, body = render_page(
-                    "HEAD" if head_only else "GET",
+                    method,
                     parsed.path,
                     query,
                     store_resolver(),
+                    body=body,
                 )
             except Exception as exc:  # pragma: no cover - render_page is total
                 logger.error("unhandled UI dispatch failure: %r", exc)
                 status, body = _error_document(500, "internal error")
             payload = body.encode("utf-8")
             self.send_response(status)
-            if status == 302:
-                self.send_header("Location", view_path("list_suites_adapters"))
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            if not head_only and payload:
+            if method != "HEAD" and payload:
                 self.wfile.write(payload)
 
         def log_message(self, fmt, *args) -> None:

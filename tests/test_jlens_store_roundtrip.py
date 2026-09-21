@@ -235,13 +235,15 @@ def test_live_default_store_four_family_cross_suite_query():
 
     The default store is append-only; the round-5 JLens run persisted real
     records for the M4 target, so a single query reconstructs records from
-    every benchmark family from the one store.
+    every benchmark family from the one store. Newer families (atlas,
+    openai_compat) may additionally be present — the assertion is subset,
+    not equality, because the live ledger grows.
     """
     s = store.Store(REPO_ROOT / ".skald" / "store")
     results = s.query()
 
     families = {r["suite"] for r in results}
-    assert families == {"bdh_cl", "pi50", "saga", "jlens"}
+    assert {"bdh_cl", "pi50", "saga", "jlens"} <= families
 
     jlens = [r for r in results if r["suite"] == "jlens"]
     assert len(jlens) >= 1

@@ -70,6 +70,37 @@ All four suites, tasks, and the `--config` keys they honor:
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
 | openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache` |
 | atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
+
+### Running benchmarks from the surfaces (no CLI needed)
+
+Both surfaces expose `run_benchmark` (launch) and `job_status` (poll) —
+the same operation set, so API and UI stay equal. A run executes the
+adapter in a background job and persists its records to the same store;
+closing the page does not stop it. Jobs live under `<store>/jobs/`; a
+restarted server marks interrupted jobs `orphaned` instead of pretending
+they continue.
+
+- **UI:** open the `run_benchmark` view (linked from the landing page):
+  pick adapter + task from dropdowns, name the run target per that
+  adapter's contract (checkpoint path, endpoint URL, or hash), paste
+  config as a JSON object, submit. The status page tracks the job and
+  links to its records when done.
+- **API:** `POST /api/v1/run_benchmark` with
+  `{"adapter": ..., "task": ..., "model": ..., "config": {...}}`, then
+  `GET /api/v1/job_status?job_id=JOB-…`.
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/v1/run_benchmark \
+  -d '{"adapter": "openai_compat", "task": "mmlu",
+       "model": "http://127.0.0.1:8888/v1",
+       "config": {"model": "qwen3.8-flash-next-stock", "max_samples": 20}}'
+# {"spec_id": ..., "operation": "run_benchmark",
+#  "job_id": ["JOB-…"], "status": ["queued"]}
+```
+
+Trust note: submitting a run equals running the adapter CLI locally.
+The surfaces are local-only; do not expose them where you would not run
+the CLI.
 | jlens | `adapters.jlens` | `layer_readout`, `verbal_report`, `directed_modulation`, `multi_hop_reasoning`, `general_broadcast`, `selective_mediation` | `python`, `vendor_dir`, `lens_source`, `prompts`, `source_layers`, `dim_batch`, `max_seq_len`, `skip_first`, `dtype`, `layers`, `position`, `top_n`, `seed`, `timeout`, `artifact_dir`, `readout_prompt` |
 
 ### bdh_cl — continual-learning suite (`python -m adapters.bdh_cl`)

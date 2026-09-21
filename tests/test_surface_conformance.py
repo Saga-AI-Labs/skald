@@ -128,8 +128,24 @@ def test_endpoint_set_view_set_operation_set_are_equal(tmp_path):
     }
     assert set(view_routes().values()) == {view_path(op) for op in spec_ops}
 
-    # Every capability is reachable on both surfaces, not just declared.
+    # Every read capability is reachable on both surfaces, not just
+    # declared. The two run operations are covered separately (they submit
+    # jobs rather than render on a bare GET — see test_run_benchmark_*):
+    # a bare GET names their required parameters on both surfaces.
     for op_id in spec_ops:
+        if op_id in ("run_benchmark", "job_status"):
+            api_status, api_body = dispatch(
+                "GET", endpoint_path(op_id), parse_qs(""), store
+            )
+            ui_status, ui_page = render_page(
+                "GET", view_path(op_id), parse_qs(""), store
+            )
+            assert api_status == 400, op_id
+            if op_id == "run_benchmark":
+                assert ui_status == 200, op_id  # the submission form
+            else:
+                assert ui_status == 400, op_id  # names job_id
+            continue
         query = (
             f"model_checkpoint_sha256={CKPT_BDH}&task=router"
             if op_id == "task_drilldown"
