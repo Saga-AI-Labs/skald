@@ -66,6 +66,8 @@ All four suites, tasks, and the `--config` keys they honor:
 | Adapter | `python -m` | Tasks | `--config` keys |
 |---|---|---|---|
 | bdh_cl | `adapters.bdh_cl` | `router`, `domain_eval`, `p5_inchain` | `repo`, `python`, `routes`, `domains`, `window`, `crops`, `batch`, `oracle_routes`, `mb`, `iters`, `parent`, `timeout` |
+| bdh_likelihood | `adapters.bdh_likelihood` | `capture_reference`, `likelihood_parity` | `repo`, `python`, `bundle_dir`, `reference_bundle`, `contexts`, `context_files`, `max_contexts`, `max_chars`, `block_size`, `dtype`, `seed`, `timeout` |
+| bdh_router_util | `adapters.bdh_router_util` | `router_utilization` | `repo`, `python`, `contexts`, `context_files`, `max_contexts`, `max_chars`, `block_size`, `mass_threshold`, `artifact_dir`, `seed`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
 | openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `repeats` |
