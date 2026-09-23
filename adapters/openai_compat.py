@@ -12,6 +12,10 @@ result records (plan §4.2):
   per-token served logprobs over sealed contexts, into a JSON bundle
 - ``likelihood_parity`` -> Path B §3.2 parity against a reference bundle:
   per-domain tokenwise KLD (``kld_*@domain``); weights+kernels as served
+- ``length_stress`` -> completion-length sweep (proposal §3.3): fixed
+  prompt(s), capped max_tokens ladder; per-step failure-mode flags
+  (ok/refusal/loop/truncated/empty) plus per-prompt curve records
+  (failure rate, first failure budget, max clean length)
 
 Interface: ``run(model, task, config) -> records[]`` (scaffold §5). Here
 ``model`` is the endpoint base URL (e.g. ``http://host:8888/v1``) and the
@@ -46,11 +50,17 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from adapters.length_stats import (
+    STRESS_CURVE_METRICS,
+    STRESS_STEP_METRICS,
+    classify,
+    summarize_curve,
+)
 from adapters.likelihood_stats import KLD_METRICS, summarize_kld
 from store.runtime import runtime_digest
 
 TASKS = {"mmlu", "humaneval", "determinism", "capture_reference",
-         "likelihood_parity"}
+         "likelihood_parity", "length_stress"}
 
 _DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 _MMLU_DATASET = "cais/mmlu"
@@ -141,6 +151,7 @@ class OpenAICompatAdapter(SuiteAdapter):
             "determinism": self._run_determinism,
             "capture_reference": self._run_capture_reference,
             "likelihood_parity": self._run_parity,
+            "length_stress": self._run_length_stress,
         }
         return handlers[task](client, served, base, identity, runtime, config)
 
@@ -368,6 +379,125 @@ class OpenAICompatAdapter(SuiteAdapter):
                     runtime=runtime,
                 )
             )
+        return records
+
+    def _run_length_stress(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Completion-length sweep (proposal §3.3): failure shape, not score.
+
+        Fixed prompt(s), capped ``max_tokens`` ladder. Each step gets one
+        failure-mode label (``classify``: empty/refusal/loop/truncated/ok);
+        per-prompt curve records report the failure rate, the first failing
+        budget (-1 when the sweep is clean), and the longest clean
+        completion. "A model that degrades gracefully and a model that
+        loops are different objects" — the flags tell them apart where a
+        single accuracy number cannot.
+
+        Optional per-prompt ``expect`` substring adds a
+        ``stress_contains_expected`` flag per step (accuracy against
+        completion length, when the operator supplies a gold string).
+        """
+        prompts = config.get("prompts")
+        if prompts is None:
+            single = config.get("prompt")
+            if not isinstance(single, str) or not single.strip():
+                raise ValueError(
+                    "openai_compat: length_stress requires config['prompt'] "
+                    "(one non-empty prompt string) or config['prompts'] "
+                    "([{prompt, expect?}...]; run once per prompt family)"
+                )
+            prompts = [{"prompt": single}]
+        if not isinstance(prompts, list) or not prompts:
+            raise ValueError(
+                "openai_compat: length_stress requires a non-empty "
+                "config['prompts'] list"
+            )
+        for item in prompts:
+            if not isinstance(item, dict) or not isinstance(
+                    item.get("prompt"), str) or not item["prompt"].strip():
+                raise ValueError(
+                    "openai_compat: every prompts entry needs a non-empty "
+                    f"'prompt' string; got {item!r}"
+                )
+        lengths = config.get("lengths", [32, 128, 512, 2048])
+        if not isinstance(lengths, list) or not lengths:
+            raise ValueError(
+                "openai_compat: length_stress requires a non-empty "
+                "config['lengths'] ladder"
+            )
+        budgets = [int(v) for v in lengths]
+        if any(b < 1 or b > 32768 for b in budgets):
+            raise ValueError(
+                "openai_compat: length_stress budgets must lie in "
+                f"1..32768; got {budgets}"
+            )
+        if len(budgets) > 12:
+            raise ValueError(
+                "openai_compat: length_stress caps the sweep at 12 steps "
+                f"(generation budget); got {len(budgets)}"
+            )
+        seed = int(config.get("seed", _SEED))
+        records = []
+        for item in prompts:
+            prompt = item["prompt"]
+            expect = item.get("expect")
+            prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+            modes, chars = [], []
+            for budget in budgets:
+                text, finish = client.complete_full(prompt, budget)
+                mode = classify(text or "", finish)
+                modes.append(mode)
+                chars.append(len(text or ""))
+                flags = {m: 1.0 if mode == m else 0.0
+                         for m in ("ok", "refusal", "loop",
+                                   "truncated", "empty")}
+                step_protocol = (
+                    f"openai_compat length_stress via {base} model {served}: "
+                    f"prompt sha {prompt_sha}, max_tokens {budget}, "
+                    f"temperature 0, seed {seed}; completion "
+                    f"{len(text or '')} chars, finish_reason "
+                    f"{finish!r} -> mode {mode}. UNVERIFIED endpoint "
+                    f"identity (model name self-reported by server, not a "
+                    f"weight hash) — never compare with weighed-in records."
+                )
+                for name in STRESS_STEP_METRICS:
+                    value = (float(chars[-1]) if name == "stress_completion_chars"
+                             else flags[name[len("stress_"):]])
+                    records.append(self._record(
+                        identity=identity, task="length_stress",
+                        metric=f"{name}:L{budget}@p{prompt_sha}",
+                        value=value, n=1, ci_low=None, ci_high=None,
+                        protocol=step_protocol, seed=seed, base=base,
+                        runtime=runtime,
+                    ))
+                if expect is not None:
+                    records.append(self._record(
+                        identity=identity, task="length_stress",
+                        metric=f"stress_contains_expected:L{budget}@p{prompt_sha}",
+                        value=1.0 if expect in (text or "") else 0.0,
+                        n=1, ci_low=None, ci_high=None,
+                        protocol=step_protocol + f" expect {expect!r}.",
+                        seed=seed, base=base, runtime=runtime,
+                    ))
+            curve = summarize_curve(modes, chars, budgets)
+            curve_protocol = (
+                f"openai_compat length_stress curve via {base} model "
+                f"{served}: prompt sha {prompt_sha} over budgets {budgets}; "
+                f"modes {[f'{b}:{m}' for b, m in zip(budgets, modes)]}; "
+                f"first_failure_at -1 means the whole sweep stayed ok, "
+                f"max_clean_chars -1 means no step was clean. UNVERIFIED "
+                f"endpoint identity — never compare with weighed-in records."
+            )
+            for name in STRESS_CURVE_METRICS:
+                records.append(self._record(
+                    identity=identity, task="length_stress",
+                    metric=f"{name}@p{prompt_sha}", value=curve[name],
+                    n=len(budgets), ci_low=None, ci_high=None,
+                    protocol=curve_protocol, seed=seed, base=base,
+                    runtime=runtime,
+                ))
         return records
 
     def _run_capture_reference(
@@ -659,6 +789,43 @@ class _Client:
             f"openai_compat: /chat/completions returned empty content and "
             f"no reasoning text: {body!r}"
         )
+
+    def complete_full(self, prompt: str, max_tokens: int
+                      ) -> tuple[str, str | None]:
+        """Completion text plus the server's ``finish_reason`` (§3.3).
+
+        ``complete`` drops the finish reason; length-stress needs it to
+        tell a budget-exhausting loop (``length``) from a natural stop.
+        A missing/empty reason degrades to ``None`` — the classifiers
+        treat ``None`` as "not the budget", never as a guess. An empty
+        completion is returned as ``""`` (a failure mode, §3.3 ``empty``),
+        not raised.
+        """
+        body = self._request(
+            "/chat/completions",
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+            },
+        )
+        try:
+            choice = body["choices"][0]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EndpointError(
+                f"openai_compat: /chat/completions returned no usable "
+                f"content: {body!r}"
+            ) from exc
+        message = choice.get("message") or {}
+        text = ""
+        for field in ("content", "reasoning_content", "reasoning"):
+            candidate = message.get(field)
+            if isinstance(candidate, str) and candidate.strip():
+                text = candidate
+                break
+        finish = choice.get("finish_reason")
+        return text, finish if isinstance(finish, str) else None
 
     def prompt_logprobs(self, prompt: str) -> list[float]:
         """Per-position log probabilities (nats) over ``prompt``'s tokens.

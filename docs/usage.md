@@ -70,7 +70,7 @@ All four suites, tasks, and the `--config` keys they honor:
 | bdh_router_util | `adapters.bdh_router_util` | `router_utilization` | `repo`, `python`, `contexts`, `context_files`, `max_contexts`, `max_chars`, `block_size`, `mass_threshold`, `artifact_dir`, `seed`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
-| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `repeats` |
+| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `repeats` |
 | null_model | `adapters.null_model` | `mmlu`, `humaneval` | `null_kind` (`stub`/`random`), `seed`, `mmlu_items`, `humaneval_items`, `exec_timeout` |
 | atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
 
@@ -268,6 +268,16 @@ budget spent itself thinking and returned null content, which the client
 now reads from the `reasoning`/`reasoning_content` fallback fields), and
 letter extraction takes the *last* A–D match (completions echo the
 question's own options first).
+
+Beyond the capability tasks: `determinism` (§3.1 gate: distinct-output
+rate + first-divergence offset at temperature 0), `capture_reference` /
+`likelihood_parity` (Path B §3.2 serving-path KLD over `/completions`
+echo logprobs), and `length_stress` (§3.3: fixed prompt(s) over a capped
+`lengths` ladder — default `[32, 128, 512, 2048]`, max 12 steps; per-step
+`stress_ok/refusal/loop/truncated/empty` flags plus per-prompt curve
+records `stress_failure_rate`, `stress_first_failure_at` (-1 = whole sweep
+clean), `stress_max_clean_chars`; optional per-prompt `expect` substring
+adds `stress_contains_expected`).
 
 ### atlas — weight diffs (`python -m adapters.atlas`)
 

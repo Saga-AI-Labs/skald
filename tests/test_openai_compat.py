@@ -462,3 +462,116 @@ def test_parity_detects_serving_change(endpoint, tmp_path):
     by_metric = {r["metric"]: r for r in records}
     assert by_metric["kld_max@general"]["value"] == pytest.approx(-2.0)
     assert by_metric["kld_mean@legal"]["value"] == pytest.approx(-2.0)
+
+
+# --- length_stress (§3.3) --------------------------------------------------
+
+
+class _StressStub(_Stub):
+    """Budget-dependent behavior: clean short stop, then a looping tail."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(length) or b"{}")
+        budget = int(req.get("max_tokens", 0))
+        if budget <= 64:
+            text = "a short clean answer."
+            finish = "stop"
+        else:
+            text = "the story begins. " + " ".join(["and then again"] * 40)
+            finish = "length"
+        self._json({"choices": [{"message": {"content": text},
+                                 "finish_reason": finish}]})
+
+
+def _stress_endpoint(stub):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), stub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_length_stress_requires_prompt(endpoint):
+    with pytest.raises(ValueError, match="requires config\\['prompt'\\]"):
+        _adapter().run(endpoint, "length_stress",
+                       {"model": "stub-model"})
+    with pytest.raises(ValueError, match="non-empty"):
+        _adapter().run(endpoint, "length_stress",
+                       {"model": "stub-model",
+                        "prompts": [{"prompt": "  "}]})
+    with pytest.raises(ValueError, match="ladder"):
+        _adapter().run(endpoint, "length_stress",
+                       {"model": "stub-model",
+                        "prompt": "hi", "lengths": []})
+    with pytest.raises(ValueError, match="1\\.\\.32768"):
+        _adapter().run(endpoint, "length_stress",
+                       {"model": "stub-model",
+                        "prompt": "hi", "lengths": [32, 99999]})
+    with pytest.raises(ValueError, match="caps the sweep"):
+        _adapter().run(endpoint, "length_stress",
+                       {"model": "stub-model",
+                        "prompt": "hi", "lengths": list(range(1, 14))})
+
+
+def test_length_stress_flags_and_curve():
+    server = _stress_endpoint(_StressStub)
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}", "length_stress",
+            {"model": "stub-model", "prompt": "tell me a story",
+             "lengths": [32, 512]},
+        )
+    finally:
+        server.shutdown()
+    for r in records:
+        assert set(r) == set(RECORD_FIELDS)
+        assert r["task"] == "length_stress"
+        assert "UNVERIFIED" in r["protocol"]
+    by_metric = {r["metric"]: r for r in records}
+    sha = next(iter(by_metric)) .split("@p")[1]
+    # short budget: clean natural stop
+    assert by_metric[f"stress_ok:L32@p{sha}"]["value"] == 1.0
+    assert by_metric[f"stress_loop:L32@p{sha}"]["value"] == 0.0
+    assert by_metric[f"stress_completion_chars:L32@p{sha}"]["value"] > 0
+    # large budget: looping tail that exhausted the budget
+    assert by_metric[f"stress_loop:L512@p{sha}"]["value"] == 1.0
+    assert by_metric[f"stress_ok:L512@p{sha}"]["value"] == 0.0
+    # curve: half the steps failed, first failure at 512
+    assert by_metric[f"stress_failure_rate@p{sha}"]["value"] == \
+        pytest.approx(0.5)
+    assert by_metric[f"stress_first_failure_at@p{sha}"]["value"] == \
+        pytest.approx(512)
+    assert by_metric[f"stress_max_clean_chars@p{sha}"]["value"] > 0
+
+
+def test_length_stress_clean_sweep_sentinel():
+    server = _stress_endpoint(_Stub)  # always answers "B", no finish reason
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}", "length_stress",
+            {"model": "stub-model", "prompt": "pick B", "lengths": [16, 32]},
+        )
+    finally:
+        server.shutdown()
+    by_metric = {r["metric"]: r for r in records}
+    sha = next(iter(by_metric)).split("@p")[1]
+    assert by_metric[f"stress_failure_rate@p{sha}"]["value"] == \
+        pytest.approx(0.0)
+    assert by_metric[f"stress_first_failure_at@p{sha}"]["value"] == \
+        pytest.approx(-1.0)
+
+
+def test_length_stress_expect_flag():
+    server = _stress_endpoint(_Stub)
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}", "length_stress",
+            {"model": "stub-model",
+             "prompts": [{"prompt": "pick B", "expect": "B"}],
+             "lengths": [16]},
+        )
+    finally:
+        server.shutdown()
+    by_metric = {r["metric"]: r for r in records}
+    sha = next(iter(by_metric)).split("@p")[1]
+    assert by_metric[f"stress_contains_expected:L16@p{sha}"]["value"] == 1.0
