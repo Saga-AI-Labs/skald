@@ -43,6 +43,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
 
 # --- the pinned protocol -------------------------------------------------
 # Change any of these and you have a different benchmark, whose results are
@@ -206,6 +208,22 @@ def main() -> int:
         print(f"{task:14} {metric:26} {value:9.4f} {(n if n is not None else 0):5}"
               f"{flag}")
     print()
+
+    if args.out:
+        payload = {
+            "model": args.model,
+            "base_url": args.base_url,
+            "api": args.api,
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "seed": SEED,
+            "pinned": {t: PINNED[t] for t in tasks},
+            "records": [
+                {"task": t, "metric": m, "value": v, "n": n}
+                for t, m, v, n in rows
+            ],
+        }
+        Path(args.out).write_text(json.dumps(payload, indent=2) + "\n")
+        print(f"wrote {len(rows)} records -> {args.out}\n")
     return 0
 
 

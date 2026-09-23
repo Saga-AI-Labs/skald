@@ -303,9 +303,23 @@ class OpenAICompatAdapter(SuiteAdapter):
         if not items:
             raise EndpointError("openai_compat: humaneval fetched zero problems")
         passed = 0
+        starved = 0
+        no_code = 0
         for p in items:
-            code = client.complete(p["prompt"], mt)
-            if _check(p, code or "", exec_timeout):
+            # Score ``content`` ONLY. ``complete()`` falls back onto the
+            # reasoning fields, so on a thinking model that exhausts its
+            # budget it hands back private deliberation -- and _check() will
+            # happily extract and execute a code block quoted *inside* that
+            # deliberation. That is not a pass@1 of the model's answer, so it
+            # must not share the number with one.
+            content, _reasoning, finish = client.answer_and_reasoning(
+                p["prompt"], mt
+            )
+            if finish == "length":
+                starved += 1
+            if not (content or "").strip():
+                no_code += 1
+            if _check(p, content or "", exec_timeout):
                 passed += 1
         n = len(items)
         score = passed / n
@@ -313,7 +327,9 @@ class OpenAICompatAdapter(SuiteAdapter):
         protocol = (
             f"openai_compat humaneval via {base} model {served}: greedy 0-shot "
             f"pass@1 {coverage}, max_tokens {mt}, seed "
-            f"{seed}, {exec_timeout}s/case exec watchdog. UNVERIFIED endpoint "
+            f"{seed}, {exec_timeout}s/case exec watchdog. Scored on the public "
+            f"answer field only (reasoning is never executed as code). "
+            f"UNVERIFIED endpoint "
             f"identity (model name self-reported by server, not a weight "
             f"hash) — never compare with weighed-in records."
         )
@@ -330,7 +346,37 @@ class OpenAICompatAdapter(SuiteAdapter):
                 seed=seed,
                 base=base,
                 runtime=runtime,
-            )
+            ),
+            # Truncation and empty answers are reported as their own buckets,
+            # not folded silently into a lower pass@1: a model that never
+            # emits code and a model that is merely capped look identical in
+            # the headline number.
+            self._record(
+                identity=identity,
+                task="humaneval",
+                metric="budget_starved",
+                value=starved / n,
+                n=n,
+                ci_low=None,
+                ci_high=None,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+                runtime=runtime,
+            ),
+            self._record(
+                identity=identity,
+                task="humaneval",
+                metric="no_code",
+                value=no_code / n,
+                n=n,
+                ci_low=None,
+                ci_high=None,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+                runtime=runtime,
+            ),
         ]
 
     def _run_determinism(
@@ -366,7 +412,10 @@ class OpenAICompatAdapter(SuiteAdapter):
         protocol = (
             f"openai_compat determinism via {base} model {served}: prompt "
             f"sha {prompt_sha}, {repeats} repeats at temperature 0, "
-            f"max_tokens {mt}, seed {seed}. UNVERIFIED endpoint identity "
+            f"max_tokens {mt}, seed {seed}. Compares the full returned text "
+            f"(content, or reasoning when a truncated thinking model leaves "
+            f"content empty) — this is a GATE on repeatability, not an "
+            f"answer-accuracy measure. UNVERIFIED endpoint identity "
             f"(model name self-reported by server, not a weight hash) — "
             f"never compare with weighed-in records."
         )

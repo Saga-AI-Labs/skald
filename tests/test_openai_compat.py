@@ -185,11 +185,19 @@ def test_humaneval_inline_items(endpoint):
         endpoint, "humaneval",
         {"model": "stub-model", "humaneval_items": HUMANEVAL_ITEMS},
     )
-    assert len(records) == 1
+    # pass_at_1 plus the truncation/empty buckets: a model that never emits
+    # code and one that is merely capped must not look alike in the headline.
+    assert [r["metric"] for r in records] == [
+        "pass_at_1", "budget_starved", "no_code"
+    ]
     r = records[0]
     assert r["metric"] == "pass_at_1"
     assert r["value"] == 1.0 and r["n"] == 2
     assert "UNVERIFIED" in r["protocol"]
+    assert "reasoning is never executed as code" in r["protocol"]
+    for extra in records[1:]:
+        assert extra["n"] == 2 and extra["value"] == 0.0
+        assert extra["ci_low"] is None and extra["ci_high"] is None
 
 
 def test_default_model_comes_from_the_server(endpoint):
