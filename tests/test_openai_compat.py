@@ -18,7 +18,10 @@ import pytest
 
 import store
 from adapters import RECORD_FIELDS, SuiteAdapter
+from adapters.likelihood_stats import KLD_METRICS
 from adapters.openai_compat import EndpointError, OpenAICompatAdapter
+
+KLD_METRICS_NAMES = KLD_METRICS
 
 MMLU_ITEMS = [
     {"prompt": "2+2?", "choices": ["3", "4", "5", "6"], "gold": "B"},
@@ -44,6 +47,7 @@ class _Stub(BaseHTTPRequestHandler):
     """Canned OpenAI-compatible server: answers B, emits correct code."""
 
     completions_seen: list = []
+    logprob_delta: float = 0.0
 
     def _json(self, body, status=200):
         payload = json.dumps(body).encode()
@@ -62,6 +66,9 @@ class _Stub(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(length) or b"{}")
+        if self.path == "/completions":
+            self._completions(req)
+            return
         prompt = req.get("messages", [{}])[-1].get("content", "")
         type(self).completions_seen.append(prompt)
         if "def add" in prompt or "def sub" in prompt:
@@ -72,6 +79,20 @@ class _Stub(BaseHTTPRequestHandler):
         else:
             text = "B"
         self._json({"choices": [{"message": {"content": text}}]})
+
+    def _completions(self, req):
+        # Legacy /completions with echo: true + logprobs: 0. Tokens are
+        # whitespace runs; logprobs are deterministic in the token text so
+        # capture and parity agree byte-for-byte when nothing changed.
+        prompt = req.get("prompt", "")
+        tokens = re.findall(r"\S+\s*|\S", prompt)
+        token_logprobs = [
+            -(len(t) + 1.0) + type(self).logprob_delta for t in tokens
+        ]
+        self._json({"choices": [{"logprobs": {
+            "tokens": tokens,
+            "token_logprobs": token_logprobs,
+        }}]})
 
     def log_message(self, *a):
         pass
@@ -293,3 +314,151 @@ def test_check_runs_fenced_code():
     chatty = "Here you go:\n```python\n    return a + b\n```\nHope that helps!"
     assert _check(problem, chatty, 10) is True
     assert _check(problem, "definitely not code at all ((((", 10) is False
+
+
+PATH_B_CONTEXTS = [
+    {"domain": "legal", "text": "This contract is governed by law."},
+    {"domain": "legal", "text": "The party shall indemnify the other."},
+    {"domain": "general", "text": "The quick brown fox jumps over the dog."},
+]
+
+
+def test_capture_reference_writes_bundle(endpoint, tmp_path):
+    bundle_out = tmp_path / "ref-b.json"
+    records = _adapter().run(
+        endpoint, "capture_reference",
+        {"model": "stub-model", "contexts": PATH_B_CONTEXTS,
+         "bundle_out": str(bundle_out)},
+    )
+    assert bundle_out.is_file()
+    bundle = json.loads(bundle_out.read_text())
+    assert bundle["created_by"] == "openai_compat capture_reference (path b)"
+    assert bundle["endpoint"] == endpoint
+    assert bundle["served"] == "stub-model"
+    assert len(bundle["reference"]) == 2
+    assert len(bundle["reference"]["legal"]) == 2
+    assert len(bundle["reference"]["general"]) == 1
+    # every captured context has one non-empty logprob list
+    for domain_items in bundle["reference"].values():
+        for item in domain_items:
+            assert item["logprobs"]
+            assert all(isinstance(v, float) for v in item["logprobs"])
+
+    by_metric = {r["metric"]: r for r in records}
+    assert set(r["task"] for r in records) == {"capture_reference"}
+    assert all(r["adapter"] == "openai_compat" for r in records)
+    assert "reference_positions@legal" in by_metric
+    assert "reference_positions@general" in by_metric
+    assert by_metric["reference_positions@general"]["value"] > 0
+    for r in records:
+        assert set(r) == set(RECORD_FIELDS)
+        assert "UNVERIFIED" in r["protocol"]
+        assert f"reference-bundle::{bundle_out}" in r["artifacts"]
+
+
+def test_capture_reference_requires_contexts(endpoint):
+    with pytest.raises(ValueError, match="no usable contexts"):
+        _adapter().run(endpoint, "capture_reference", {"model": "stub-model"})
+
+
+def test_parity_against_identical_serving_is_zero(endpoint, tmp_path):
+    bundle_out = tmp_path / "ref.json"
+    _adapter().run(
+        endpoint, "capture_reference",
+        {"model": "stub-model", "contexts": PATH_B_CONTEXTS,
+         "bundle_out": str(bundle_out)},
+    )
+    records = _adapter().run(
+        endpoint, "likelihood_parity",
+        {"model": "stub-model", "reference_bundle": str(bundle_out)},
+    )
+    by_metric = {r["metric"]: r for r in records}
+    assert all(r["task"] == "likelihood_parity" for r in records)
+    for domain in ("legal", "general"):
+        assert by_metric[f"kld_mean@{domain}"]["value"] == pytest.approx(0.0)
+        assert by_metric[f"kld_max@{domain}"]["value"] == pytest.approx(0.0)
+        assert by_metric[f"kld_cvar95@{domain}"]["value"] == pytest.approx(0.0)
+        assert by_metric[f"n_tokens@{domain}"]["value"] > 0
+    # same serving, same tokens -> every kld_*@domain metric exact 0 besides n
+    kld_records = [r for r in records if "kld_" in r["metric"]]
+    assert len(kld_records) == 2 * len(KLD_METRICS_NAMES)
+    assert all("UNVERIFIED" in r["protocol"] for r in kld_records)
+
+
+def test_parity_requires_a_reference_bundle(endpoint):
+    with pytest.raises(FileNotFoundError, match="reference_bundle"):
+        _adapter().run(endpoint, "likelihood_parity", {"model": "stub-model"})
+
+
+def test_parity_requires_a_path_b_bundle(endpoint, tmp_path):
+    not_bundle = tmp_path / "not-b.json"
+    not_bundle.write_text(json.dumps({"created_by": "something else"}))
+    with pytest.raises(ValueError, match="not a path-b reference bundle"):
+        _adapter().run(
+            endpoint, "likelihood_parity",
+            {"model": "stub-model", "reference_bundle": str(not_bundle)},
+        )
+
+
+def test_parity_rejects_tokenization_drift(endpoint, tmp_path):
+    bundle_out = tmp_path / "ref.json"
+    _adapter().run(
+        endpoint, "capture_reference",
+        {"model": "stub-model", "contexts": PATH_B_CONTEXTS,
+         "bundle_out": str(bundle_out)},
+    )
+
+    # A serving whose /completions tokenizes differently (per-character):
+    # per-token pairing across tokenizers is meaningless -> must fail loudly.
+    class _Drifted(_Stub):
+        def _completions(self, req):
+            prompt = req.get("prompt", "")
+            tokens = list(prompt)
+            self._json({"choices": [{"logprobs": {
+                "tokens": tokens,
+                "token_logprobs": [-1.0] * len(tokens),
+            }}]})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Drifted)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(EndpointError, match="tokenization changed"):
+            _adapter().run(
+                f"http://127.0.0.1:{server.server_port}",
+                "likelihood_parity",
+                {"model": "stub-model", "reference_bundle": str(bundle_out)},
+            )
+    finally:
+        server.shutdown()
+
+
+def test_parity_detects_serving_change(endpoint, tmp_path):
+    bundle_out = tmp_path / "ref.json"
+    _adapter().run(
+        endpoint, "capture_reference",
+        {"model": "stub-model", "contexts": PATH_B_CONTEXTS,
+         "bundle_out": str(bundle_out)},
+    )
+
+    # Shift every served logprob by a constant: same tokens (no drift), but
+    # the distribution the candidate assigns has moved -> kld_mean is the
+    # constant offset (ref - cand), nowhere near zero.
+    class _Shifted(_Stub):
+        logprob_delta = 2.0
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Shifted)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}",
+            "likelihood_parity",
+            {"model": "stub-model", "reference_bundle": str(bundle_out)},
+        )
+    finally:
+        server.shutdown()
+
+    by_metric = {r["metric"]: r for r in records}
+    assert by_metric["kld_max@general"]["value"] == pytest.approx(-2.0)
+    assert by_metric["kld_mean@legal"]["value"] == pytest.approx(-2.0)

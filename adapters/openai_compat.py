@@ -8,6 +8,10 @@ result records (plan §4.2):
 - ``humaneval``   -> greedy 0-shot pass@1 over HumanEval problems
 - ``determinism`` -> repeat-sampling gate (proposal §3.1): distinct-output
   rate + first-divergence offset for one prompt at temperature 0
+- ``capture_reference`` -> Path B §3.2 serving-path reference capture:
+  per-token served logprobs over sealed contexts, into a JSON bundle
+- ``likelihood_parity`` -> Path B §3.2 parity against a reference bundle:
+  per-domain tokenwise KLD (``kld_*@domain``); weights+kernels as served
 
 Interface: ``run(model, task, config) -> records[]`` (scaffold §5). Here
 ``model`` is the endpoint base URL (e.g. ``http://host:8888/v1``) and the
@@ -42,9 +46,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from adapters.likelihood_stats import KLD_METRICS, summarize_kld
 from store.runtime import runtime_digest
 
-TASKS = {"mmlu", "humaneval", "determinism"}
+TASKS = {"mmlu", "humaneval", "determinism", "capture_reference",
+         "likelihood_parity"}
 
 _DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 _MMLU_DATASET = "cais/mmlu"
@@ -119,6 +125,7 @@ class OpenAICompatAdapter(SuiteAdapter):
             api_key=config.get("api_key"),
             timeout=int(config.get("timeout", 300)),
         )
+        client.echo_max_tokens = int(config.get("echo_max_tokens", 0))
         served = str(config.get("model") or client.default_model())
         client.model = served
         identity = hashlib.sha256(
@@ -132,6 +139,8 @@ class OpenAICompatAdapter(SuiteAdapter):
             "mmlu": self._run_mmlu,
             "humaneval": self._run_humaneval,
             "determinism": self._run_determinism,
+            "capture_reference": self._run_capture_reference,
+            "likelihood_parity": self._run_parity,
         }
         return handlers[task](client, served, base, identity, runtime, config)
 
@@ -361,6 +370,153 @@ class OpenAICompatAdapter(SuiteAdapter):
             )
         return records
 
+    def _run_capture_reference(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Path B reference capture (proposal §3.2): served logprobs.
+
+        For each sealed context, records the *served* per-token logprobs
+        from ``/completions`` (``echo:true, logprobs:0``) into a JSON
+        reference bundle, and emits ``reference_positions`` per domain. The
+        bundle is the serving-path reference floor: this measures
+        weights *and* kernels as actually served — the A/B difference is
+        exactly the point (Path A in ``bdh_likelihood`` measures weights
+        only, offline).
+        """
+        from adapters.bdh_likelihood import load_contexts
+
+        bundle_path = Path(config.get("bundle_out") or
+                           f"reference-{served}-{_now().replace(':', '')}.json")
+        domains = load_contexts(config)
+        bundle: dict[str, Any] = {
+            "created_by": "openai_compat capture_reference (path b)",
+            "created_at": _now(),
+            "reference_identity": identity,
+            "endpoint": base,
+            "served": served,
+            "runtime_sha256": runtime,
+            "reference": {},
+        }
+        records: list[dict[str, Any]] = []
+        seed = int(config.get("seed", _SEED))
+        for dom in domains:
+            domain = dom["domain"]
+            texts_out = []
+            for text in dom["texts"]:
+                logprobs = client.prompt_logprobs(text)
+                texts_out.append({"text": text, "logprobs": logprobs})
+            bundle["reference"][domain] = texts_out
+            total = sum(len(t["logprobs"]) for t in texts_out)
+            bundle["positions_per_domain"] = bundle.get(
+                "positions_per_domain", {})
+            bundle["positions_per_domain"][domain] = total
+            records.append(self._record(
+                identity=identity, task="capture_reference",
+                metric=f"reference_positions@{domain}", value=float(total),
+                n=total, ci_low=None, ci_high=None,
+                protocol=(
+                    f"openai_compat capture-reference (path b) via {base} "
+                    f"model {served}: served per-token logprobs over "
+                    f"{len(dom['texts'])} sealed contexts in domain "
+                    f"{domain!r} ({total} positions), weights+kernels as "
+                    f"served. UNVERIFIED endpoint identity — never compare "
+                    f"with weighed-in records."
+                ),
+                seed=seed, base=base, runtime=runtime,
+            ))
+        bundle_path.write_text(json.dumps(bundle, indent=2) + "\n")
+        for r in records:
+            r["artifacts"] = [
+                f"endpoint::{base}", f"reference-bundle::{bundle_path}",
+            ]
+        return records
+
+    def _run_parity(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Path B parity (proposal §3.2): served reference vs served candidate.
+
+        Re-queries the serving path over the sealed contexts captured by
+        ``capture_reference`` and reports the per-domain *tokenwise* KLD
+        (realized-token ``ref_lp - cand_lp``) — metrics are ``kld_*@domain``,
+        deliberately distinct from Path A's full-vocab ``kl_*@domain`` so
+        the two paths are never conflated in the store.
+        """
+        bundle_path = Path(config.get("reference_bundle") or "")
+        if not bundle_path.is_file():
+            raise FileNotFoundError(
+                "openai_compat: likelihood_parity requires "
+                "config['reference_bundle'] pointing at a "
+                "capture_reference bundle (got "
+                f"{bundle_path})"
+            )
+        bundle = json.loads(bundle_path.read_text())
+        if bundle.get("created_by") != "openai_compat capture_reference (path b)":
+            raise ValueError(
+                f"openai_compat: {bundle_path} is not a path-b reference "
+                f"bundle (created_by={bundle.get('created_by')!r})"
+            )
+        seed = int(config.get("seed", _SEED))
+        kld_by_domain: dict[str, list[float]] = {}
+        total_by_domain: dict[str, int] = {}
+        for domain, texts_out in sorted(bundle["reference"].items()):
+            domain_total = 0
+            for item in texts_out:
+                cand = client.prompt_logprobs(item["text"])
+                ref = item["logprobs"]
+                if len(cand) != len(ref):
+                    raise EndpointError(
+                        f"openai_compat: serving tokenization changed for "
+                        f"domain {domain!r}: reference bundle has "
+                        f"{len(ref)} logprobs for this context but the "
+                        f"current serving returned {len(cand)}. Per-token "
+                        f"pairing is meaningless across tokenizers — "
+                        f"re-capture with capture_reference."
+                    )
+                domain_total += len(ref)
+                kld_by_domain.setdefault(domain, []).extend(
+                    r - c for r, c in zip(ref, cand)
+                )
+            total_by_domain[domain] = domain_total
+        records: list[dict[str, Any]] = []
+        for domain in sorted(kld_by_domain):
+            summary = summarize_kld(kld_by_domain[domain])
+            protocol = (
+                f"openai_compat likelihood-parity (path b) via {base} model "
+                f"{served}: tokenwise KLD per realized token, reference "
+                f"bundle {bundle_path.name} (captured "
+                f"{bundle['created_at']} from served "
+                f"{bundle['served']}@{bundle['endpoint']}), candidate "
+                f"{served}@{base}; domain {domain!r}, {summary['n']} "
+                f"positions. Measures weights+kernels as served — the "
+                f"A/B difference is the finding (Path A = weights only, "
+                f"offline). UNVERIFIED endpoint identity — never compare "
+                f"with weighed-in records."
+            )
+            for metric in KLD_METRICS:
+                records.append(self._record(
+                    identity=identity, task="likelihood_parity",
+                    metric=f"{metric}@{domain}",
+                    value=summary[metric], n=summary["n"],
+                    ci_low=None, ci_high=None, protocol=protocol,
+                    seed=seed, base=base, runtime=runtime,
+                ))
+            records.append(self._record(
+                identity=identity, task="likelihood_parity",
+                metric=f"n_tokens@{domain}",
+                value=float(total_by_domain[domain]),
+                n=total_by_domain[domain], ci_low=None, ci_high=None,
+                protocol=protocol, seed=seed, base=base, runtime=runtime,
+            ))
+        if not records:
+            raise RuntimeError(
+                "openai_compat: parity bundle has no contexts — refusing "
+                "to store an empty run"
+            )
+        return records
+
     # --- records ----------------------------------------------------------
 
     def _record(self, *, identity: str, task: str, metric: str, value: float,
@@ -416,6 +572,8 @@ class _Client:
         self.timeout = timeout
         self.model = ""
         self.last_headers: dict[str, str] = {}
+        self.echo_max_tokens = 0  # 0 = echo prompt only; >0 drops that many
+        # trailing generated tokens before treating the rest as the prompt.
 
     def _request(self, path: str, payload: dict | None) -> Any:
         url = self.base + path
@@ -501,6 +659,67 @@ class _Client:
             f"openai_compat: /chat/completions returned empty content and "
             f"no reasoning text: {body!r}"
         )
+
+    def prompt_logprobs(self, prompt: str) -> list[float]:
+        """Per-position log probabilities (nats) over ``prompt``'s tokens.
+
+        Path B (§3.2): the serving-path realized-token distribution. Uses
+        the legacy ``/completions`` endpoint with ``echo: true`` and
+        ``logprobs: 0`` — the one place OpenAI-compatible servers put
+        *prompt* logprobs (``/chat/completions`` only returns completion
+        token logprobs, which is a different, generated-token distribution).
+
+        Returns one logprob per prompt token (the probability the *served*
+        model assigned to the token that actually appears), or raises
+        ``EndpointError`` when the endpoint does not expose prompt logprobs.
+        """
+        body = self._request(
+            "/completions",
+            {
+                "model": self.model,
+                "prompt": prompt,
+                "temperature": 0,
+                "max_tokens": self.echo_max_tokens,
+                "echo": True,
+                "logprobs": 0,
+            },
+        )
+        try:
+            slot = body["choices"][0]["logprobs"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EndpointError(
+                f"openai_compat: /completions returned no logprobs slot: "
+                f"{body!r}"
+            ) from exc
+        # 'echo' prepends the prompt tokens, then any generated tokens
+        # (none when echo_max_tokens=0; strip them otherwise).
+        tokens = slot.get("tokens")
+        token_logprobs = slot.get("token_logprobs")
+        if not isinstance(tokens, list) or not isinstance(token_logprobs, list):
+            raise EndpointError(
+                f"openai_compat: /completions logprobs malformed: {slot!r}"
+            )
+        if len(tokens) != len(token_logprobs):
+            raise EndpointError(
+                f"openai_compat: /completions tokens/logprobs misaligned "
+                f"({len(tokens)} vs {len(token_logprobs)})"
+            )
+        n_gen = min(self.echo_max_tokens, len(tokens))
+        prompt_logprobs = token_logprobs[: len(tokens) - n_gen] if n_gen else token_logprobs
+        values: list[float] = []
+        for lp in prompt_logprobs:
+            if lp is None:
+                raise EndpointError(
+                    f"openai_compat: /completions returned a null token "
+                    f"logprob (logprobs: 0 unsupported?): {token_logprobs!r}"
+                )
+            values.append(float(lp))
+        if not values:
+            raise EndpointError(
+                f"openai_compat: /completions echoed no prompt tokens "
+                f"(empty prompt?): {body!r}"
+            )
+        return values
 
 
 def _fetch_rows(server: str, dataset: str, config: str, n: int,
