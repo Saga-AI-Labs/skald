@@ -19,7 +19,8 @@ import pytest
 import store
 from adapters import RECORD_FIELDS, SuiteAdapter
 from adapters.likelihood_stats import KLD_METRICS
-from adapters.openai_compat import EndpointError, OpenAICompatAdapter
+from adapters.openai_compat import EndpointError, OpenAICompatAdapter, _check
+from adapters import local_bench
 
 KLD_METRICS_NAMES = KLD_METRICS
 
@@ -44,10 +45,17 @@ HUMANEVAL_ITEMS = [
 
 
 class _Stub(BaseHTTPRequestHandler):
-    """Canned OpenAI-compatible server: answers B, emits correct code."""
+    """Canned OpenAI-compatible server: answers B, emits correct code.
+
+    ``math_answer`` / ``fact_answer`` / ``tool_script`` are opt-in and default
+    to None so every pre-existing test keeps the original canned behaviour.
+    """
 
     completions_seen: list = []
     logprob_delta: float = 0.0
+    math_answer: str | None = None
+    fact_answer: str | None = None
+    tool_script: list | None = None
 
     def _json(self, body, status=200):
         payload = json.dumps(body).encode()
@@ -71,11 +79,29 @@ class _Stub(BaseHTTPRequestHandler):
             return
         prompt = req.get("messages", [{}])[-1].get("content", "")
         type(self).completions_seen.append(prompt)
+        if req.get("tools") and type(self).tool_script is not None:
+            # scripted agentic turn: emit queued tool calls, then the answer
+            step = type(self).tool_script.pop(0) if type(self).tool_script else None
+            if isinstance(step, dict) and step.get("expr"):
+                call = {"id": f"c{len(type(self).completions_seen)}",
+                       "type": "function",
+                       "function": {"name": "calc",
+                                   "arguments": json.dumps({"expr": step["expr"]})}}
+                self._json({"choices": [{"message": {"content": None,
+                                                    "tool_calls": [call]}}]})
+                return
+            self._json({"choices": [{"message":
+                                     {"content": (step or {}).get("final", "")}}]})
+            return
         if "def add" in prompt or "def sub" in prompt:
             # echo a correct body for whichever function was asked
             name = "add" if "def add" in prompt else "sub"
             op = "+" if name == "add" else "-"
             text = f"    return a {op} b"
+        elif type(self).math_answer is not None:
+            text = type(self).math_answer
+        elif type(self).fact_answer is not None:
+            text = type(self).fact_answer
         else:
             text = "B"
         self._json({"choices": [{"message": {"content": text}}]})
@@ -102,6 +128,9 @@ class _Stub(BaseHTTPRequestHandler):
 def endpoint():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     _Stub.completions_seen = []
+    _Stub.math_answer = None
+    _Stub.fact_answer = None
+    _Stub.tool_script = None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
@@ -127,8 +156,12 @@ def test_model_must_be_a_url():
 
 
 def test_unknown_task_is_rejected(endpoint):
+    # NB: this once used "gsm8k" as its example of an unknown task. gsm8k is a
+    # real task now, which is exactly why the assertion had to move -- a name
+    # that is free today is not guaranteed free tomorrow, so pick one that can
+    # never be a task.
     with pytest.raises(ValueError, match="unsupported task"):
-        _adapter().run(endpoint, "gsm8k", {})
+        _adapter().run(endpoint, "no_such_task_name", {})
 
 
 def test_mmlu_inline_items(endpoint):
@@ -678,3 +711,178 @@ def test_perturbation_aggregate_over_items():
     assert by_metric["perturb_verdict_change_rate:Ptoken_sub"]["n"] == 2
     assert by_metric["perturb_verdict_change_rate:Ptoken_sub"]["value"] == \
         pytest.approx(1.0)
+
+
+# --- local-corpus tasks: gsm8k / simpleqa / tool_use ----------------------
+
+GSM8K_ITEMS = [
+    {"id": "a", "prompt": "2+5?", "gold": "7"},
+    {"id": "b", "prompt": "3*3?", "gold": "9"},
+]
+
+
+def test_gsm8k_scores_free_form_math(endpoint):
+    """The math axis must be answerable without multiple choice."""
+    _Stub.math_answer = "reasoning here\n#### 7"
+    records = _adapter().run(
+        endpoint, "gsm8k",
+        {"model": "stub-model", "gsm8k_items": GSM8K_ITEMS, "max_tokens": 64})
+    by = {r["metric"]: r for r in records}
+    assert set(r["metric"] for r in records) == {
+        "accuracy", "answerable", "budget_starved"}
+    assert by["accuracy"]["value"] == 0.5          # 1 of 2 correct
+    assert by["accuracy"]["task"] == "gsm8k"
+    assert by["answerable"]["value"] == 1.0        # both were readable
+    assert by["budget_starved"]["value"] == 0.0    # nothing lost to thinking
+    assert "gsm8k" in by["accuracy"]["protocol"]
+    assert "UNVERIFIED" in by["accuracy"]["protocol"]
+
+
+def test_gsm8k_unanswerable_is_not_counted_wrong(endpoint):
+    """A response we cannot read is a third bucket, never folded into WRONG.
+
+    The vendored harness recorded its own lesson on this: counting such an
+    item in both buckets made the tallies exceed n.
+    """
+    _Stub.math_answer = "I am unable to determine a value."
+    records = _adapter().run(
+        endpoint, "gsm8k",
+        {"model": "stub-model", "gsm8k_items": GSM8K_ITEMS, "max_tokens": 64})
+    by = {r["metric"]: r for r in records}
+    assert by["accuracy"]["value"] == 0.0
+    # unanswered counts as a failure, so accuracy is 0 -- but it is NOT silent:
+    # answerable reports the collapse, so a formatting failure is told apart
+    # from an arithmetic one instead of masquerading as low skill.
+    assert by["answerable"]["value"] == 0.0
+    # the stub answered (non-empty content), so this is a genuine no-number
+    # failure and NOT a thinking-budget artefact -- the two must be tellable
+    assert by["budget_starved"]["value"] == 0.0
+
+
+def test_simpleqa_measures_factuality(endpoint):
+    _Stub.fact_answer = "Michio Sugeno"
+    records = _adapter().run(
+        endpoint, "simpleqa",
+        {"model": "stub-model", "max_samples": 1,
+         "simpleqa_items": [{"id": "s1", "prompt": "Who won?", "gold": "Michio Sugeno"}]})
+    assert [r["metric"] for r in records] == ["accuracy", "budget_starved"]
+    r = records[0]
+    assert r["task"] == "simpleqa" and r["value"] == 1.0
+    # softness is stated in the record itself, not only in the docs
+    assert "SOFTER" in r["protocol"]
+
+
+def test_tool_use_drives_a_real_tool_loop(endpoint):
+    """The agentic axis: issue calls, carry observations forward, terminate.
+
+    The scripted final answer is the *computed* gold rather than a number this
+    test invents, so a pass means the loop really reached the chain's value.
+    """
+    _p, terms, gold = local_bench.build_task(1, 2)
+    _Stub.tool_script = [{"expr": f"{terms[0]['operand']}"}] * 0 + [
+        {"expr": "1+1"}, {"expr": "2*2"}, {"final": f"#### {int(gold)}"}]
+    records = _adapter().run(
+        endpoint, "tool_use",
+        {"model": "stub-model", "max_samples": 1, "steps": 2, "seed": 1,
+         "max_tokens": 64})
+    by = {r["metric"]: r for r in records}
+    assert set(by) == {"solved", "tool_calls_per_item", "no_tool_call"}
+    assert by["solved"]["value"] == 1.0
+    assert by["no_tool_call"]["value"] == 0.0        # it did use the tool
+    assert by["tool_calls_per_item"]["value"] >= 2   # at least one call per step
+
+
+def test_calc_tool_refuses_to_execute_anything_but_arithmetic(endpoint):
+    """The model supplies the expression, so the gate is load-bearing."""
+    assert local_bench.run_calc("2+3*4") == 14
+    for evil in ("__import__('os').system('id')", "open('/etc/passwd').read()",
+                 "getattr(1,'clas s')", "2**99999999"):
+        out = local_bench.run_calc(evil)
+        assert isinstance(out, str) and out.startswith("error:"), (evil, out)
+
+
+def test_missing_corpus_raises_instead_of_scoring_zero(endpoint, tmp_path):
+    """An empty corpus scoring 0.0 is indistinguishable from a model that
+    answered everything wrong -- so a missing file must be loud."""
+    with pytest.raises(local_bench.CorpusError):
+        local_bench.load_jsonl("definitely_not_here.jsonl", data_dir=tmp_path)
+
+
+def test_math_extractor_prefers_the_committed_answer():
+    """Preference order matters: in a worked solution the FIRST number is a
+    given and the LAST is the answer."""
+    assert local_bench.predict_math("given 16 eggs\nsold 2 each\n#### 32") == 32.0
+    assert local_bench.predict_math("steps...\nThe final answer is 18.") == 18.0
+    assert local_bench.predict_math("16 eggs, 2 each, so 32") == 32.0
+    assert local_bench.predict_math("no digits at all") is None
+    assert local_bench.predict_math("#### $1,234") == 1234.0
+
+
+def test_tool_use_gold_is_computed_and_reproducible():
+    """The constructed task stays honest only because the gold is computed
+    from the chain and the seed reproduces it exactly."""
+    _p1, _t1, g1 = local_bench.build_task(7, 4)
+    _p2, _t2, g2 = local_bench.build_task(7, 4)
+    _p3, _t3, g3 = local_bench.build_task(8, 4)
+    assert g1 == g2 != g3
+    # replaying the chain through the very tool the model is handed must agree
+    prompt, terms, gold = local_bench.build_task(3, 3)
+    start = float(prompt.split("STARTING VALUE:")[1].split()[0])
+    acc = start
+    for t in terms:
+        acc = local_bench.run_calc(f"{acc}{t['op']}{t['operand']}")
+        assert not isinstance(acc, str), acc
+    assert abs(acc - gold) <= 1e-6
+
+
+def test_check_works_from_a_worker_thread():
+    """HumanEval was unusable through the API.
+
+    ``_check`` armed SIGALRM with ``signal.setitimer``, which raises
+    ``ValueError: signal only works in main thread of the main interpreter``
+    from a worker thread -- and the API runs every job in a worker thread, so
+    the documented way to drive skald could not run the one task that measures
+    coding. The check now runs in a subprocess (as ``saga.py`` always has), so
+    the alarm is legal and the model's code is kept out of the API process.
+    """
+    problem = {
+        "prompt": "def add(a, b):\n    \"\"\"Add.\"\"\"\n",
+        "entry_point": "add",
+        "test": "def check(f):\n    assert f(1, 2) == 3\n",
+    }
+    out: dict = {}
+
+    def _work():
+        try:
+            out["good"] = _check(problem, "    return a + b", 10)
+            out["bad"] = _check(problem, "definitely not code ((((", 10)
+            out["hang"] = _check(
+                problem, "import time\ntime.sleep(30)\n    return a + b", 2)
+        except BaseException as exc:            # the old failure mode
+            out["error"] = f"{type(exc).__name__}: {exc}"
+
+    thread = threading.Thread(target=_work)
+    thread.start()
+    thread.join(120)
+    assert not thread.is_alive(), "_check hung in a worker thread"
+    assert "error" not in out, out["error"]
+    assert out["good"] is True
+    assert out["bad"] is False
+    # the child's own alarm must still bite from a thread, not just in-process
+    assert out["hang"] is False
+
+
+def test_check_does_not_execute_model_code_in_this_process():
+    """The HumanEval protocol is code execution; the code is the model's.
+
+    A completion that would kill the process must fail the item, not take the
+    hub down with it.
+    """
+    problem = {
+        "prompt": "def add(a, b):\n    \"\"\"Add.\"\"\"\n",
+        "entry_point": "add",
+        "test": "def check(f):\n    assert f(1, 2) == 3\n",
+    }
+    assert _check(problem, "import os\nos.kill(os.getpid(), 9)\n    return a+b", 10) is False
+    # and we are still here to assert it
+    assert _check(problem, "    return a + b", 10) is True

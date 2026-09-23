@@ -22,3 +22,6 @@ build/
 # stray serving-path reference bundles written to cwd when a capture test
 # omits config['bundle_out'] (refuses clean capture without an explicit out)
 /reference-ref-*/
+
+# agent working scratch (not part of the product)
+.jspace/

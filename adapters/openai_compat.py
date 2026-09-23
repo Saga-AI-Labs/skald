@@ -47,6 +47,8 @@ import math
 import re
 import signal
 import socket
+import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -62,6 +64,7 @@ from adapters.length_stats import (
     summarize_curve,
 )
 from adapters.likelihood_stats import KLD_METRICS, summarize_kld
+from adapters import local_bench
 from adapters.perturb_stats import (
     PERTURB_AGG_METRICS,
     PERTURB_STEP_METRICS,
@@ -73,7 +76,8 @@ from adapters.perturb_stats import (
 from store.runtime import runtime_digest
 
 TASKS = {"mmlu", "humaneval", "determinism", "capture_reference",
-         "likelihood_parity", "length_stress", "perturbation"}
+         "likelihood_parity", "length_stress", "perturbation",
+         "gsm8k", "simpleqa", "tool_use"}
 
 _DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 _MMLU_DATASET = "cais/mmlu"
@@ -89,6 +93,17 @@ _HUMANEVAL_CONFIG = "openai_humaneval"
 _DEFAULTS = {
     "mmlu": {"num_fewshot": 5, "max_samples": 100, "max_tokens": 64},
     "humaneval": {"max_samples": 20, "max_tokens": 256},
+    # Free-form math: no few-shot prefix (the corpus prompts are zero-shot by
+    # construction), and a long budget because a worked solution is long.
+    # Budgets are sized for a THINKING endpoint: this server spends ~1100
+    # tokens on deliberation before it emits content, so a small max_tokens
+    # yields empty content on every item and the task scores 0.0 for a reason
+    # that has nothing to do with capability. budget_starved makes that visible
+    # rather than leaving it to be misread as ignorance.
+    "gsm8k": {"max_samples": 100, "max_tokens": 2048},
+    "simpleqa": {"max_samples": 100, "max_tokens": 2048},
+    "tool_use": {"max_samples": 20, "max_tokens": 256, "steps": 4,
+                 "max_tool_calls": 24},
 }
 _SEED = 42
 _EXEC_TIMEOUT = 10  # per-case watchdog for executing generated HumanEval code
@@ -98,6 +113,25 @@ _LETTER_RE = re.compile(r"\b([A-D])\b")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _json_arg(raw: Any, key: str) -> Any:
+    """Pull one field out of a tool call's JSON ``arguments`` string.
+
+    Tolerates the two shapes servers actually emit: a JSON object string, or
+    an already-decoded dict. Returns ``None`` rather than raising when the
+    payload is unusable, so one malformed tool call degrades to a failed item
+    instead of aborting the run.
+    """
+    if isinstance(raw, dict):
+        return raw.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return None
+    return obj.get(key) if isinstance(obj, dict) else None
 
 
 def _ci(score: float, n: int | None) -> tuple[float | None, float | None]:
@@ -166,6 +200,9 @@ class OpenAICompatAdapter(SuiteAdapter):
             "likelihood_parity": self._run_parity,
             "length_stress": self._run_length_stress,
             "perturbation": self._run_perturbation,
+            "gsm8k": self._run_gsm8k,
+            "simpleqa": self._run_simpleqa,
+            "tool_use": self._run_tool_use,
         }
         return handlers[task](client, served, base, identity, runtime, config)
 
@@ -181,7 +218,10 @@ class OpenAICompatAdapter(SuiteAdapter):
         ms = int(ms) if ms is not None else None
         mt = int(config.get("max_tokens", d["max_tokens"]))
         seed = int(config.get("seed", _SEED))
-        subjects = list(config.get("subjects", _MMLU_SUBJECTS))
+        subjects = list(config.get("subjects",
+                        local_bench.SUBJECT_SETS.get(
+                            str(config.get("subject_set", "default")),
+                            _MMLU_SUBJECTS)))
         items = config.get("mmlu_items")
         if items is None:
             cache_dir = config.get("datasets_cache")
@@ -806,6 +846,206 @@ class OpenAICompatAdapter(SuiteAdapter):
 
     # --- records ----------------------------------------------------------
 
+    # --- local-corpus tasks (adapters.local_bench) -------------------------
+
+    def _run_gsm8k(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Free-form grade-school math: worked solutions, numeric answer.
+
+        The point of this task is that it is *not* multiple choice. MMLU's
+        math subjects are four-way MC, where guessing scores 0.25 and a model
+        can select the right number without computing anything; here the model
+        must produce the number, so 0.0 means it could not do the arithmetic.
+        """
+        d = _DEFAULTS["gsm8k"]
+        ms = config.get("max_samples", d["max_samples"])
+        ms = int(ms) if ms is not None else None
+        mt = int(config.get("max_tokens", d["max_tokens"]))
+        seed = int(config.get("seed", _SEED))
+        items = config.get("gsm8k_items") or local_bench.load_jsonl(
+            local_bench.GSM8K_FILE, data_dir=config.get("data_dir"))
+        if ms is not None:
+            items = items[:ms]
+        if not items:
+            raise EndpointError("openai_compat: gsm8k has zero evaluation items")
+        prompts = [f"{it['prompt']}\n\nWork it out step by step, then give "
+                   f"the answer on a final line as '#### <number>'."
+                   for it in items]
+        # content only, never the reasoning fallback: scoring a thinking
+        # model's private deliberation against a gold is a different measurement
+        pairs = [client.answer_and_reasoning(pr, mt) for pr in prompts]
+        s = local_bench.score_math(items, [p for p, _r, _f in pairs],
+                                   [r for _p, r, _f in pairs])
+        protocol = (
+            f"openai_compat gsm8k via {base} model {served}: free-form "
+            f"grade-school math, zero-shot, numeric answer extracted by "
+            f"####/last-number rule, temperature 0, max_tokens {mt}, seed "
+            f"{seed}. unparseable answers are a separate NO_ANSWER bucket and "
+            f"count as failures (accuracy {s['correct']}/{s['n']}, "
+            f"unanswered {s['unanswered']}). UNVERIFIED endpoint identity "
+            f"(model name self-reported by server, not a weight hash) -- "
+            f"never compare with weighed-in records."
+        )
+        recs = [self._record(
+            identity=identity, task="gsm8k", metric="accuracy",
+            value=s["accuracy"], n=s["n"], ci_low=ci, ci_high=ch,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        ) for ci, ch in [_ci(s["accuracy"], s["n"])]]
+        recs.append(self._record(
+            identity=identity, task="gsm8k", metric="answerable",
+            value=s["answerable"], n=s["n"], ci_low=None, ci_high=None,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        ))
+        recs.append(self._record(
+            identity=identity, task="gsm8k", metric="budget_starved",
+            value=(s["budget_starved"] / s["n"]) if s["n"] else 0.0,
+            n=s["n"], ci_low=None, ci_high=None,
+            protocol=(protocol + f". budget_starved {s['budget_starved']}/{s['n']}"
+                      f": no answer emitted because the token budget was spent"
+                      f" thinking (max_tokens {mt}); a budget setting, not a"
+                      f" capability result"),
+            seed=seed, base=base, runtime=runtime,
+        ))
+        return recs
+
+    def _run_simpleqa(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Short-form factuality. Softer than the other metrics -- read it as such.
+
+        Gold is free text, so scoring is normalised containment. It
+        under-counts correct answers phrased differently from the gold and
+        over-counts a model that quotes the gold string back without meaning
+        it. It therefore has its own metric name and must not be averaged with
+        the exact-match tasks.
+        """
+        d = _DEFAULTS["simpleqa"]
+        ms = config.get("max_samples", d["max_samples"])
+        ms = int(ms) if ms is not None else None
+        mt = int(config.get("max_tokens", d["max_tokens"]))
+        seed = int(config.get("seed", _SEED))
+        items = config.get("simpleqa_items") or local_bench.load_jsonl(
+            local_bench.SIMPLEQA_FILE, data_dir=config.get("data_dir"))
+        if ms is not None:
+            items = items[:ms]
+        if not items:
+            raise EndpointError("openai_compat: simpleqa has zero evaluation items")
+        prompts = [f"Answer with a short factual phrase, no explanation."
+                   f"\n\n{it['prompt']}" for it in items]
+        # content only: a thinking model's deliberation must never be scored
+        # as its answer
+        pairs = [client.answer_and_reasoning(pr, mt) for pr in prompts]
+        s = local_bench.score_factuality(items, [p for p, _r, _f in pairs],
+                                         [r for _p, r, _f in pairs])
+        protocol = (
+            f"openai_compat simpleqa via {base} model {served}: short-form "
+            f"factuality, normalised-containment scoring (SOFTER than exact "
+            f"match: under-counts paraphrase, over-counts quoted gold), "
+            f"temperature 0, max_tokens {mt}, seed {seed}. UNVERIFIED endpoint "
+            f"identity (model name self-reported by server, not a weight hash) "
+            f"-- never compare with weighed-in records."
+        )
+        recs = [self._record(
+            identity=identity, task="simpleqa", metric="accuracy",
+            value=s["accuracy"], n=s["n"], ci_low=ci, ci_high=ch,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        ) for ci, ch in [_ci(s["accuracy"], s["n"])]]
+        recs.append(self._record(
+            identity=identity, task="simpleqa", metric="budget_starved",
+            value=(s["budget_starved"] / s["n"]) if s["n"] else 0.0,
+            n=s["n"], ci_low=None, ci_high=None,
+            protocol=(protocol + f". budget_starved {s['budget_starved']}/{s['n']}"
+                      f": no answer emitted, the token budget was spent thinking"
+                      f" (max_tokens {mt}). A zero here with a high"
+                      f" budget_starved is a BUDGET result, not evidence that"
+                      f" the model lacks the fact"),
+            seed=seed, base=base, runtime=runtime,
+        ))
+        return recs
+
+    def _run_tool_use(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Multi-step tool use: plan N calc calls, read observations, terminate.
+
+        Constructed, not published -- there is no agentic corpus on disk and
+        the datasets server mirrors only the two datasets already in use. What
+        keeps it honest is that the gold is COMPUTED: the chain's result is
+        obtained by evaluating the same expression the model is asked to work
+        through, so correctness is checkable with no authored answer key, and
+        ``seed`` reproduces the item exactly. The measured skill is not
+        arithmetic (the tool does that) but whether the model issues the calls,
+        carries each observation into the next, and stops.
+        """
+        d = _DEFAULTS["tool_use"]
+        ms = int(config.get("max_samples", d["max_samples"]))
+        mt = int(config.get("max_tokens", d["max_tokens"]))
+        steps = int(config.get("steps", d["steps"]))
+        budget = int(config.get("max_tool_calls", d["max_tool_calls"]))
+        seed = int(config.get("seed", _SEED))
+        if ms <= 0 or steps < 1:
+            raise ValueError("openai_compat: tool_use needs max_samples>0 and steps>=1")
+
+        solved = 0
+        calls_total = 0
+        no_terminate = 0
+        for i in range(ms):
+            prompt, _terms, gold = local_bench.build_task(seed + i, steps)
+            msgs: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+            calls = 0
+            text = ""
+            for _ in range(budget):
+                turn = client.chat_tools(msgs, local_bench.CALC_SCHEMA, mt)
+                calls += 1
+                text = turn.get("content") or ""
+                tcs = turn.get("tool_calls") or []
+                if not tcs:
+                    break
+                msgs.append({"role": "assistant", "content": text or None,
+                            "tool_calls": tcs})
+                for tc in tcs:
+                    fn = (tc.get("function") or {})
+                    expr = _json_arg(fn.get("arguments"), "expr")
+                    obs = local_bench.run_calc(expr if isinstance(expr, str) else "")
+                    msgs.append({"role": "tool", "tool_call_id": tc.get("id"),
+                                "content": str(obs)})
+            calls_total += calls
+            if calls == 0:
+                no_terminate += 1
+            pred = local_bench.predict_math(text)
+            if pred is not None and abs(pred - gold) <= 1e-6:
+                solved += 1
+        rate = solved / ms
+        protocol = (
+            f"openai_compat tool_use via {base} model {served}: {steps}-step "
+            f"arithmetic chains driven through a calc tool, {ms} items, gold "
+            f"COMPUTED from the chain (not authored), seed {seed} reproduces "
+            f"items, tool-call budget {budget}/item, temperature 0. Measures "
+            f"multi-step tool driving and termination, not arithmetic. "
+            f"CONSTRUCTED task -- no published agentic corpus was available; "
+            f"treat as indicative, not as a named benchmark. UNVERIFIED "
+            f"endpoint identity (model name self-reported by server, not a "
+            f"weight hash) -- never compare with weighed-in records."
+        )
+        recs = [self._record(
+            identity=identity, task="tool_use", metric="solved",
+            value=rate, n=ms, ci_low=ci, ci_high=ch,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        ) for ci, ch in [_ci(rate, ms)]]
+        recs.append(self._record(
+            identity=identity, task="tool_use", metric="tool_calls_per_item",
+            value=calls_total / ms, n=ms, ci_low=None, ci_high=None,
+            protocol=protocol, seed=seed, base=base, runtime=runtime))
+        recs.append(self._record(
+            identity=identity, task="tool_use", metric="no_tool_call",
+            value=no_terminate / ms, n=ms, ci_low=None, ci_high=None,
+            protocol=protocol, seed=seed, base=base, runtime=runtime))
+        return recs
+
     def _record(self, *, identity: str, task: str, metric: str, value: float,
                 n: int | None, ci_low: float | None, ci_high: float | None,
                 protocol: str, seed: int, base: str,
@@ -918,7 +1158,102 @@ class _Client:
             facts["server"] = lowered["server"]
         return facts
 
+    def chat_tools(self, messages: list[dict], tools: list[dict],
+                   max_tokens: int) -> dict[str, Any]:
+        """One chat turn that may return tool calls instead of an answer.
+
+        Returns the assistant ``message`` object verbatim (``content`` and/or
+        ``tool_calls``). Kept separate from ``complete`` because a tool turn is
+        a different contract: the caller must feed observations back and the
+        turn may legitimately carry no content at all.
+        """
+        body = self._request(
+            "/chat/completions",
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "tools": tools,
+                "tool_choice": "auto",
+            },
+        )
+        try:
+            message = body["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EndpointError(
+                f"openai_compat: /chat/completions returned no message: {body!r}"
+            ) from exc
+        if not isinstance(message, dict):
+            raise EndpointError(
+                f"openai_compat: tool turn message is not an object: {message!r}"
+            )
+        return message
+
     def complete(self, prompt: str, max_tokens: int) -> str:
+        """Completion text, falling back onto the reasoning fields.
+
+        Preserved deliberately for existing callers (humaneval, perturbation,
+        determinism): a reasoning model that leaves ``content`` null still
+        yields *some* text here. Scorers must not use this -- they use
+        ``answer_and_reasoning`` and score ``content`` only, because measuring
+        a model's private deliberation against a gold answer is a different
+        measurement from measuring its public answer.
+        """
+        message = self._chat_message(prompt, max_tokens)
+        for field in ("content", "reasoning_content", "reasoning"):
+            text = message.get(field)
+            if isinstance(text, str) and text.strip():
+                return text
+        raise EndpointError(
+            f"openai_compat: /chat/completions returned empty content and "
+            f"no reasoning text: {message!r}"
+        )
+
+    def answer_and_reasoning(self, prompt: str, max_tokens: int
+                             ) -> tuple[str, str, str | None]:
+        """Return ``(content, reasoning, finish_reason)`` for one prompt.
+
+        Kept separate from ``complete`` on purpose. ``complete`` falls back
+        onto the reasoning fields, which is right for a caller that just wants
+        *some* text but is wrong for a scorer: a thinking model that exhausts
+        its budget leaves ``content`` empty and puts everything in
+        ``reasoning``, so scoring the fallback measures the model's private
+        deliberation against the gold instead of its public answer. Those are
+        different measurements and must not share a number.
+
+        The three states stay distinct -- empty content with empty reasoning
+        (no output), empty content with non-empty reasoning (the budget went
+        into thinking and no answer was ever produced), and non-empty content
+        (a real answer). Only the last is a capability result; collapsing the
+        first two is what would make a footprint lie.
+        """
+        body = self._request(
+            "/chat/completions",
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+            },
+        )
+        try:
+            choice = body["choices"][0]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EndpointError(
+                f"openai_compat: /chat/completions returned no usable "
+                f"content: {body!r}"
+            ) from exc
+        message = choice.get("message") or {}
+        content = message.get("content")
+        reasoning = (message.get("reasoning_content")
+                     or message.get("reasoning"))
+        content = content if isinstance(content, str) else ""
+        reasoning = reasoning if isinstance(reasoning, str) else ""
+        reason = choice.get("finish_reason") or choice.get("stop_reason")
+        return content, reasoning, (reason if isinstance(reason, str) else None)
+
+    def _chat_message(self, prompt: str, max_tokens: int) -> dict:
         body = self._request(
             "/chat/completions",
             {
@@ -935,17 +1270,7 @@ class _Client:
                 f"openai_compat: /chat/completions returned no usable "
                 f"content: {body!r}"
             ) from exc
-        # Reasoning models may leave content null while thinking fits the
-        # budget: fall back through the known reasoning fields (vLLM uses
-        # "reasoning", others "reasoning_content").
-        for field in ("content", "reasoning_content", "reasoning"):
-            text = message.get(field)
-            if isinstance(text, str) and text.strip():
-                return text
-        raise EndpointError(
-            f"openai_compat: /chat/completions returned empty content and "
-            f"no reasoning text: {body!r}"
-        )
+        return message or {}
 
     def complete_full(self, prompt: str, max_tokens: int
                       ) -> tuple[str, str | None]:
@@ -1197,32 +1522,64 @@ def _extract_code(gen_code: str) -> str:
 
 
 def _check(problem: dict, gen_code: str, exec_timeout: int) -> bool:
-    """Execute the generated completion against the problem's tests."""
+    """Execute the generated completion against the problem's tests.
+
+    Runs in a *subprocess*, for two reasons that are both load-bearing:
+
+    1. Thread safety. The previous implementation armed ``SIGALRM`` via
+       ``signal.setitimer``, which raises ``ValueError: signal only works in
+       main thread of the main interpreter`` whenever the adapter is driven
+       from a worker thread -- which is exactly how the API runs jobs. So
+       HumanEval was unusable through ``/api/v1/run_benchmark``, the documented
+       way to drive skald. A subprocess owns its own main thread, so the alarm
+       is legal there, and this matches how ``saga.py`` already does it.
+    2. Isolation. The HumanEval protocol is code execution, and the code being
+       executed is whatever the model emitted. It should not run inside the
+       API process, where it could take the whole hub down with it.
+
+    Semantics are unchanged: pass means ``check()`` returned without raising,
+    anything else -- exception, timeout, non-zero exit -- is a failure.
+    """
     def _alarm(_sig, _frm) -> None:
         raise _Timeout()
 
-    ns: dict = {}
     # Drop leading blank lines only: stripping all leading whitespace would
     # dedent the first code line out of the function body (SyntaxError).
     body = _extract_code(gen_code)
-    if body.startswith("def "):
+    while body and not body.split("\n")[0].strip():
+        body = body.split("\n", 1)[1] if "\n" in body else ""
+    while body.startswith("def "):
         body = "\n".join(body.split("\n")[1:]).lstrip("\n")
-    if body.startswith("def "):
-        body = "\n".join(body.split("\n")[1:]).lstrip("\n")
-    full = problem["prompt"] + "\n" + body + "\n" + problem["test"]
-    old = signal.signal(signal.SIGALRM, _alarm)
-    signal.setitimer(signal.ITIMER_REAL, exec_timeout)
+    full = problem["prompt"] + "\n" + body + "\n" + problem["test"] + "\n"
+    child = (
+        "import signal, sys\n"
+        "class _TO(Exception): pass\n"
+        "def _h(s, f): raise _TO()\n"
+        "signal.signal(signal.SIGALRM, _h)\n"
+        f"signal.setitimer(signal.ITIMER_REAL, {int(exec_timeout)})\n"
+        "ns = {}\n"
+        f"src = {full!r}\n"
+        "try:\n"
+        "    exec(compile(src, '<humaneval>', 'exec'), ns)\n"
+        f"    ns['check'](ns[{problem['entry_point']!r}])\n"
+        "except BaseException:\n"
+        "    sys.exit(1)\n"
+        "sys.exit(0)\n"
+    )
     try:
-        exec(full, ns)  # noqa: S102 - the HumanEval protocol is code execution
-        ns["check"](ns[problem["entry_point"]])
-        return True  # HumanEval check() returns None; no exception means pass
-    except _Timeout:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-c", child],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            # wall-clock backstop beyond the child's own alarm, in case the
+            # model's code blocks somewhere the alarm cannot interrupt
+            timeout=exec_timeout + 10,
+        )
+        return proc.returncode == 0
+    except subprocess.TimeoutExpired:
         return False
-    except Exception:
+    except OSError:
         return False
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
