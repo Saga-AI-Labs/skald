@@ -224,6 +224,64 @@ def test_extract_code_preserves_indentation():
     assert _extract_code("    return a + b") == "    return a + b"
 
 
+def test_determinism_requires_a_prompt(endpoint):
+    with pytest.raises(ValueError, match="config\\['prompt'\\]"):
+        _adapter().run(endpoint, "determinism", {"model": "stub-model"})
+    with pytest.raises(ValueError, match="repeats >= 2"):
+        _adapter().run(
+            endpoint, "determinism",
+            {"model": "stub-model", "prompt": "say hi", "repeats": 1},
+        )
+
+
+def test_determinism_stable_endpoint(endpoint):
+    records = _adapter().run(
+        endpoint, "determinism",
+        {"model": "stub-model", "prompt": "say hi", "repeats": 12},
+    )
+    by_metric = {r["metric"]: r for r in records}
+    assert set(by_metric) == {
+        "distinct_output_rate", "reproducible", "num_distinct_outputs",
+    }  # no divergence metric when all outputs agree
+    assert by_metric["distinct_output_rate"]["value"] == pytest.approx(1 / 12)
+    assert by_metric["reproducible"]["value"] == 1.0
+    assert by_metric["num_distinct_outputs"]["value"] == 1.0
+    for r in records:
+        assert set(r) == set(RECORD_FIELDS)
+        assert r["task"] == "determinism" and r["n"] == 12
+        assert "UNVERIFIED" in r["protocol"]
+
+
+def test_determinism_reports_first_divergence():
+    class _FlipFlop(_Stub):
+        calls = 0
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            type(self).calls += 1
+            text = "answer: yes" if type(self).calls % 2 else "answer: no!"
+            self._json({"choices": [{"message": {"content": text}}]})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FlipFlop)
+    _FlipFlop.calls = 0
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}", "determinism",
+            {"model": "stub-model", "prompt": "yes or no?", "repeats": 10},
+        )
+    finally:
+        server.shutdown()
+    by_metric = {r["metric"]: r for r in records}
+    assert by_metric["distinct_output_rate"]["value"] == pytest.approx(2 / 10)
+    assert by_metric["reproducible"]["value"] == 0.0
+    assert by_metric["num_distinct_outputs"]["value"] == 2.0
+    # "answer: yes" vs "answer: no!": first difference at offset 8
+    assert by_metric["first_divergence_char"]["value"] == 8.0
+
+
 def test_check_runs_fenced_code():
     from adapters.openai_compat import _check
 

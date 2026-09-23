@@ -4,8 +4,10 @@ Drives any OpenAI-compatible `/chat/completions` endpoint (vLLM, llama.cpp
 server, text-generation-webui, ...) for a target model and returns unified
 result records (plan §4.2):
 
-- ``mmlu``      -> letter-choice accuracy over MMLU subjects
-- ``humaneval`` -> greedy 0-shot pass@1 over HumanEval problems
+- ``mmlu``        -> letter-choice accuracy over MMLU subjects
+- ``humaneval``   -> greedy 0-shot pass@1 over HumanEval problems
+- ``determinism`` -> repeat-sampling gate (proposal §3.1): distinct-output
+  rate + first-divergence offset for one prompt at temperature 0
 
 Interface: ``run(model, task, config) -> records[]`` (scaffold §5). Here
 ``model`` is the endpoint base URL (e.g. ``http://host:8888/v1``) and the
@@ -41,7 +43,7 @@ from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
 
-TASKS = {"mmlu", "humaneval"}
+TASKS = {"mmlu", "humaneval", "determinism"}
 
 _DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 _MMLU_DATASET = "cais/mmlu"
@@ -75,6 +77,16 @@ def _ci(score: float, n: int | None) -> tuple[float | None, float | None]:
     p = max(0.0, min(1.0, float(score)))
     se = math.sqrt(p * (1.0 - p) / n)
     return max(0.0, p - 1.96 * se), min(1.0, p + 1.96 * se)
+
+
+def _first_divergence(a: str, b: str) -> int:
+    """Earliest character offset where *a* and *b* differ (min length if
+    one is a strict prefix of the other). Inputs are assumed distinct."""
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n
 
 
 class EndpointError(RuntimeError):
@@ -111,7 +123,11 @@ class OpenAICompatAdapter(SuiteAdapter):
         identity = hashlib.sha256(
             f"openai-compat::{base}::{served}".encode("utf-8")
         ).hexdigest()
-        handlers = {"mmlu": self._run_mmlu, "humaneval": self._run_humaneval}
+        handlers = {
+            "mmlu": self._run_mmlu,
+            "humaneval": self._run_humaneval,
+            "determinism": self._run_determinism,
+        }
         return handlers[task](client, served, base, identity, config)
 
     # --- task handlers ----------------------------------------------------
@@ -233,6 +249,103 @@ class OpenAICompatAdapter(SuiteAdapter):
                 base=base,
             )
         ]
+
+    def _run_determinism(
+        self, client: "_Client", served: str, base: str, identity: str, config: dict
+    ) -> list[dict[str, Any]]:
+        """Determinism probe (proposal §3.1): a gate, not a metric.
+
+        Same prompt, ``temperature=0`` (the client's fixed setting), N
+        repeats. Reports the distinct-output rate plus the first-divergence
+        character offset (the earliest position where any two completions
+        differ). A checkpoint failing this probe — ``reproducible == 0`` —
+        should have its capability records treated as non-reproducible
+        samples rather than bare scalars; the probe gates the other
+        measurements, it does not sit beside them.
+        """
+        prompt = config.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(
+                "openai_compat: determinism requires config['prompt'] "
+                "(one non-empty prompt string; run once per prompt family)"
+            )
+        repeats = int(config.get("repeats", 12))
+        if repeats < 2:
+            raise ValueError(
+                f"openai_compat: determinism requires repeats >= 2; got {repeats}"
+            )
+        mt = int(config.get("max_tokens", _DEFAULTS["mmlu"]["max_tokens"]))
+        seed = int(config.get("seed", _SEED))
+        outputs = [client.complete(prompt, mt) or "" for _ in range(repeats)]
+        distinct = sorted(set(outputs))
+        prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        protocol = (
+            f"openai_compat determinism via {base} model {served}: prompt "
+            f"sha {prompt_sha}, {repeats} repeats at temperature 0, "
+            f"max_tokens {mt}, seed {seed}. UNVERIFIED endpoint identity "
+            f"(model name self-reported by server, not a weight hash) — "
+            f"never compare with weighed-in records."
+        )
+        records = [
+            self._record(
+                identity=identity,
+                task="determinism",
+                metric="distinct_output_rate",
+                value=len(distinct) / repeats,
+                n=repeats,
+                ci_low=None,
+                ci_high=None,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+            ),
+            self._record(
+                identity=identity,
+                task="determinism",
+                metric="reproducible",
+                value=1.0 if len(distinct) == 1 else 0.0,
+                n=repeats,
+                ci_low=None,
+                ci_high=None,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+            ),
+            self._record(
+                identity=identity,
+                task="determinism",
+                metric="num_distinct_outputs",
+                value=float(len(distinct)),
+                n=repeats,
+                ci_low=None,
+                ci_high=None,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+            ),
+        ]
+        if len(distinct) > 1:
+            # Earliest character offset where any two completions differ;
+            # min length when one output is a strict prefix of another.
+            first = min(
+                _first_divergence(a, b) for i, a in enumerate(distinct)
+                for b in distinct[i + 1:]
+            )
+            records.append(
+                self._record(
+                    identity=identity,
+                    task="determinism",
+                    metric="first_divergence_char",
+                    value=float(first),
+                    n=repeats,
+                    ci_low=None,
+                    ci_high=None,
+                    protocol=protocol,
+                    seed=seed,
+                    base=base,
+                )
+            )
+        return records
 
     # --- records ----------------------------------------------------------
 
