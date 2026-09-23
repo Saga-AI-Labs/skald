@@ -171,3 +171,31 @@ And two claims I made and then retracted, recorded because the retraction is the
 
 None of these are architectural. §1 is the only one that changes what you can
 *believe*, so it goes first.
+
+---
+
+## 6. `query_results` has no time-range filter, so a run cannot be scoped to itself
+
+`query_results` declares `created_at` as a filter, but it is **exact-match**, not
+a range — there is no `since`/`until`. A runner therefore cannot ask the store
+for "the records my job wrote", and the store accumulates.
+
+The consequence is not cosmetic. `run_footprint.py` originally read the whole
+history for a task and printed it, so a rerun displayed the previous run's rows
+alongside the new ones. Two numbers under one `task`/`metric` pair then read as
+two measurements of one thing, when in fact one was an older run at a different
+`max_tokens` — precisely the confusion the runner exists to prevent. It is how
+`gsm8k` appeared as both 0.88 and 0.92 in one table.
+
+`run_footprint.py` now snapshots the per-task count before submitting and takes
+the tail afterwards, **checking that tail against the job's own `record_count`**
+rather than trusting insertion order, which the store does not promise; on
+mismatch it says so and falls back rather than silently presenting a mixed
+table. Verified: with 6 historical `tool_use` records present, a rerun printed
+only its own 3.
+
+The durable fix belongs in the surface: a `created_from`/`created_to` pair on
+`query_results`, or returning record ids from `job_status` so a caller can
+select exactly what its job produced. Until then every runner over the store
+must reimplement this diffing by hand, and the ones that do not will report
+stale numbers as fresh.

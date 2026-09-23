@@ -84,6 +84,17 @@ def _get(api: str, op: str, **params: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _count_for(api: str, task: str, model: str) -> int:
+    """How many records this task+model already have, before we submit."""
+    try:
+        recs = _get(api, "query_results", adapter="openai_compat",
+                   task=task).get("records", [])
+    except (urllib.error.URLError, ValueError):
+        return 0
+    return len([r for r in recs
+               if r.get("protocol", "").find(f"model {model}:") >= 0])
+
+
 def run_one(api: str, base_url: str, model: str, task: str, n: int | None,
             timeout_s: int) -> list[dict]:
     cfg = dict(PINNED[task])
@@ -93,6 +104,15 @@ def run_one(api: str, base_url: str, model: str, task: str, n: int | None,
     cfg["seed"] = SEED
     if task == "determinism":
         cfg["prompt"] = DET_PROMPT
+
+    # Snapshot the history BEFORE submitting, so the table can be scoped to
+    # this run only. query_results has no time-range filter (created_at is
+    # exact-match), so a runner cannot ask the store for "the records my job
+    # wrote" -- and the store accumulates, so a naive read prints every prior
+    # run of the same task as well. Two numbers under one task name then look
+    # like two measurements of one thing, which is exactly the confusion this
+    # runner exists to prevent.
+    n_before = _count_for(api, task, model)
 
     job = _post(api, "run_benchmark",
                 {"adapter": "openai_compat", "task": task,
@@ -121,6 +141,15 @@ def run_one(api: str, base_url: str, model: str, task: str, n: int | None,
     recs = _get(api, "query_results", adapter="openai_compat", task=task).get(
         "records", [])
     mine = [r for r in recs if r.get("protocol", "").find(f"model {model}:") >= 0]
+    wanted = int(g("record_count") or 0)
+    if wanted:
+        tail = mine[n_before:] if len(mine) >= n_before else []
+        # check the tail against the job's own record_count rather than trusting
+        # insertion order, which the store does not promise
+        if len(tail) == wanted:
+            return tail
+        print(f"\n    !! {task}: job reported {wanted} records, tail has "
+              f"{len(tail)} -- falling back to full history", end="")
     return mine or recs
 
 
