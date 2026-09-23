@@ -575,3 +575,106 @@ def test_length_stress_expect_flag():
     by_metric = {r["metric"]: r for r in records}
     sha = next(iter(by_metric)).split("@p")[1]
     assert by_metric[f"stress_contains_expected:L16@p{sha}"]["value"] == 1.0
+
+
+# --- perturbation (§3.5) ---------------------------------------------------
+
+
+class _PerturbStub(_Stub):
+    """Baseline answers 'B'; ws_jitter/clause_swap are invisible, so the
+    verdict holds. token_sub inserts '___', and the stub flips to 'A'."""
+
+    call_count = 0
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(length) or b"{}")
+        content = (req.get("messages") or [{}])[0].get("content", "")
+        if "___" in content:
+            text = "answer: A"
+        else:
+            text = "answer: B"
+        self._json({"choices": [{"message": {"content": text}}],
+                    "finish_reason": "stop"})
+
+
+def _perturb_endpoint(stub):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), stub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_perturbation_requires_prompts(endpoint):
+    with pytest.raises(ValueError, match="config\\['prompt'\\]"):
+        _adapter().run(endpoint, "perturbation", {"model": "stub-model"})
+    with pytest.raises(ValueError, match="non-empty"):
+        _adapter().run(endpoint, "perturbation",
+                       {"model": "stub-model", "prompts": []})
+    with pytest.raises(ValueError, match="list/tuple"):
+        _adapter().run(endpoint, "perturbation",
+                       {"model": "stub-model", "prompt": "hi",
+                        "perturbations": "ws_jitter"})
+    with pytest.raises(ValueError, match="unknown perturbations"):
+        _adapter().run(endpoint, "perturbation",
+                       {"model": "stub-model", "prompt": "hi",
+                        "perturbations": ["nope"]})
+    with pytest.raises(ValueError, match="1\\.\\.32768"):
+        _adapter().run(endpoint, "perturbation",
+                       {"model": "stub-model", "prompt": "x",
+                        "max_tokens": 99999})
+
+
+def test_perturbation_stability_and_agg():
+    server = _perturb_endpoint(_PerturbStub)
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}", "perturbation",
+            {"model": "stub-model", "prompt": "1 + 1 =? A:2 B:2 C:3 D:4",
+             "gold": "B",
+             "perturbations": ["ws_jitter", "token_sub", "clause_swap"]},
+        )
+    finally:
+        server.shutdown()
+    for r in records:
+        assert set(r) == set(RECORD_FIELDS)
+        assert r["task"] == "perturbation"
+        assert "UNVERIFIED" in r["protocol"]
+    by_metric = {r["metric"]: r for r in records}
+    sha = next(iter(by_metric)).split("@p")[1]
+    # whitespace jitter: stub still answers B -> stable
+    assert by_metric[f"perturb_jaccard:Pws_jitter@p{sha}"]["value"] == 1.0
+    assert by_metric[f"perturb_verdict_changed:Pws_jitter@p{sha}"]["value"] == 0.0
+    # clause swap: unchanged verdict
+    assert by_metric[f"perturb_verdict_changed:Pclause_swap@p{sha}"]["value"] == 0.0
+    # token substitution flips the verdict
+    assert by_metric[f"perturb_verdict_changed:Ptoken_sub@p{sha}"]["value"] == 1.0
+    # token_sub stubs returns "answer: A" vs baseline "answer: B" -> 1/3 overlap
+    assert by_metric[f"perturb_jaccard:Ptoken_sub@p{sha}"]["value"] == \
+        pytest.approx(1 / 3)
+    # aggregates over n=1 item
+    assert by_metric["perturb_mean_jaccard:Ptoken_sub"]["value"] == \
+        pytest.approx(1 / 3)
+    assert by_metric["perturb_verdict_change_rate:Ptoken_sub"]["value"] == \
+        pytest.approx(1.0)
+    assert by_metric["perturb_verdict_change_rate:Pws_jitter"]["value"] == \
+        pytest.approx(0.0)
+
+
+def test_perturbation_aggregate_over_items():
+    server = _perturb_endpoint(_PerturbStub)
+    try:
+        records = _adapter().run(
+            f"http://127.0.0.1:{server.server_port}", "perturbation",
+            {"model": "stub-model",
+             "prompts": [{"prompt": "q1 " + "a" * 8, "gold": "B"},
+                         {"prompt": "q1 " + "b" * 8, "gold": "B"}],
+             "perturbations": ["token_sub"]},
+        )
+    finally:
+        server.shutdown()
+    by_metric = {r["metric"]: r for r in records}
+    # both items flip (each contains '___') -> 100% churn, n=2
+    assert by_metric["perturb_verdict_change_rate:Ptoken_sub"]["n"] == 2
+    assert by_metric["perturb_verdict_change_rate:Ptoken_sub"]["value"] == \
+        pytest.approx(1.0)

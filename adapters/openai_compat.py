@@ -16,6 +16,11 @@ result records (plan §4.2):
   prompt(s), capped max_tokens ladder; per-step failure-mode flags
   (ok/refusal/loop/truncated/empty) plus per-prompt curve records
   (failure rate, first failure budget, max clean length)
+- ``perturbation`` -> prompt-surface sensitivity (proposal §3.5): per item,
+  each of three small stated perturbations (whitespace jitter, one-token
+  substitution, first-two-clause swap) applied to the same prompt; report
+  output stability as token-set Jaccard vs the unperturbed completion and
+  whether the answer verdict changed.
 
 Interface: ``run(model, task, config) -> records[]`` (scaffold §5). Here
 ``model`` is the endpoint base URL (e.g. ``http://host:8888/v1``) and the
@@ -57,10 +62,18 @@ from adapters.length_stats import (
     summarize_curve,
 )
 from adapters.likelihood_stats import KLD_METRICS, summarize_kld
+from adapters.perturb_stats import (
+    PERTURB_AGG_METRICS,
+    PERTURB_STEP_METRICS,
+    PERTURBATIONS,
+    apply_perturbation,
+    jaccard,
+    verdict,
+)
 from store.runtime import runtime_digest
 
 TASKS = {"mmlu", "humaneval", "determinism", "capture_reference",
-         "likelihood_parity", "length_stress"}
+         "likelihood_parity", "length_stress", "perturbation"}
 
 _DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 _MMLU_DATASET = "cais/mmlu"
@@ -152,6 +165,7 @@ class OpenAICompatAdapter(SuiteAdapter):
             "capture_reference": self._run_capture_reference,
             "likelihood_parity": self._run_parity,
             "length_stress": self._run_length_stress,
+            "perturbation": self._run_perturbation,
         }
         return handlers[task](client, served, base, identity, runtime, config)
 
@@ -498,6 +512,149 @@ class OpenAICompatAdapter(SuiteAdapter):
                     protocol=curve_protocol, seed=seed, base=base,
                     runtime=runtime,
                 ))
+        return records
+
+    def _run_perturbation(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """Prompt-surface sensitivity (proposal §3.5): stability over input
+        perturbations.
+
+        For each prompt, first get the unperturbed completion, then apply
+        each of a stated set of small deterministic perturbations to the
+        *input* (whitespace jitter, one-token substitution, first-two-clause
+        swap) and re-ask. Reports, per (item, perturbation): token-set
+        Jaccard between the two completions, and whether the verdict moved.
+        ``verdict`` is the last A–D letter when the item carries a ``gold``
+        (letter-choice items like mmlu), else the raw completion — so
+        ``perturb_verdict_changed`` always means "the answer moved".
+
+        "Catches a model that has learned the surface of the task rather
+        than the task" (proposal §3.5): a model whose output is stable
+        under a perturbed input that changes nothing semantically is
+        reading the words, not the intent.
+
+        Config: ``prompts`` (or single ``prompt``), optional per-item
+        ``gold``, ``perturbations`` (default: all of
+        ``ws_jitter, token_sub, clause_swap``), ``max_tokens``.
+        """
+        prompts = config.get("prompts")
+        if prompts is None:
+            single = config.get("prompt")
+            if not isinstance(single, str) or not single.strip():
+                raise ValueError(
+                    "openai_compat: perturbation requires config['prompt'] "
+                    "(one non-empty prompt string) or config['prompts'] "
+                    "([{prompt, gold?}...]; run once per item)"
+                )
+            prompts = [{"prompt": single}]
+        if not isinstance(prompts, list) or not prompts:
+            raise ValueError(
+                "openai_compat: perturbation requires a non-empty "
+                "config['prompts'] list"
+            )
+        for item in prompts:
+            if not isinstance(item, dict) or not isinstance(
+                    item.get("prompt"), str) or not item["prompt"].strip():
+                raise ValueError(
+                    "openai_compat: every prompts entry needs a non-empty "
+                    f"'prompt' string; got {item!r}"
+                )
+        raw_chosen = config.get("perturbations", PERTURBATIONS)
+        if isinstance(raw_chosen, str) or not isinstance(raw_chosen, (list, tuple)):
+            raise ValueError(
+                "openai_compat: config['perturbations'] must be a list/tuple "
+                "of operator names, not a bare string"
+            )
+        chosen = list(raw_chosen)
+        if not chosen:
+            raise ValueError(
+                "openai_compat: perturbation requires a non-empty "
+                "config['perturbations'] list"
+            )
+        unknown = set(chosen) - set(PERTURBATIONS)
+        if unknown:
+            raise ValueError(
+                f"openai_compat: unknown perturbations {sorted(unknown)}; "
+                f"choose from {PERTURBATIONS}"
+            )
+        if any(not isinstance(p, str) for p in chosen):
+            raise ValueError(
+                "openai_compat: config['perturbations'] must be a list of "
+                "operator names"
+            )
+        mt = int(config.get("max_tokens", _DEFAULTS["mmlu"]["max_tokens"]))
+        if mt < 1 or mt > 32768:
+            raise ValueError(
+                f"openai_compat: perturbation max_tokens must lie in "
+                f"1..32768; got {mt}"
+            )
+        seed = int(config.get("seed", _SEED))
+        records = []
+        agg = {name: {"jaccs": [], "changed": []} for name in chosen}
+        for item in prompts:
+            prompt = item["prompt"]
+            gold = item.get("gold")
+            prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+            baseline = client.complete(prompt, mt) or ""
+            base_verdict = verdict(baseline, gold)
+            for name in chosen:
+                perturbed_prompt = apply_perturbation(name, prompt)
+                if perturbed_prompt == prompt:
+                    completion = baseline
+                else:
+                    completion = client.complete(perturbed_prompt, mt) or ""
+                sim = jaccard(baseline, completion)
+                moved = 1.0 if verdict(completion, gold) != base_verdict else 0.0
+                agg[name]["jaccs"].append(sim)
+                agg[name]["changed"].append(moved)
+                step_protocol = (
+                    f"openai_compat perturbation via {base} model {served}: "
+                    f"item {prompt_sha}, perturbation {name}, max_tokens {mt}, "
+                    f"temperature 0, seed {seed}; prompt perturbed "
+                    f"deterministically (token_sub at fixed middle position, "
+                    f"ws_jitter permutes whitespace, clause_swap reorders the "
+                    f"first two sentences) — semantic content unchanged; "
+                    f"jaccard {sim:.4f} over token sets, verdict "
+                    f"{'moved' if moved else 'stable'} "
+                    f"(gold {gold!r}). UNVERIFIED endpoint identity — never "
+                    f"compare with weighed-in records."
+                )
+                for metric in PERTURB_STEP_METRICS:
+                    value = sim if metric == "perturb_jaccard" else moved
+                    records.append(self._record(
+                        identity=identity, task="perturbation",
+                        metric=f"{metric}:P{name}@p{prompt_sha}",
+                        value=value, n=1, ci_low=None, ci_high=None,
+                        protocol=step_protocol, seed=seed, base=base,
+                        runtime=runtime,
+                    ))
+        n = len(prompts)
+        for name in chosen:
+            mean_j = sum(agg[name]["jaccs"]) / n
+            rate = sum(agg[name]["changed"]) / n
+            agg_protocol = (
+                f"openai_compat perturbation aggregate via {base} model "
+                f"{served}: perturbation {name} over {n} item(s); mean "
+                f"token-set Jaccard and verdict-change rate across items. "
+                f"UNVERIFIED endpoint identity — never compare with "
+                f"weighed-in records."
+            )
+            lo_j, hi_j = _ci(mean_j, n)
+            lo_r, hi_r = _ci(rate, n)
+            records.append(self._record(
+                identity=identity, task="perturbation",
+                metric=f"perturb_mean_jaccard:P{name}",
+                value=mean_j, n=n, ci_low=lo_j, ci_high=hi_j,
+                protocol=agg_protocol, seed=seed, base=base, runtime=runtime,
+            ))
+            records.append(self._record(
+                identity=identity, task="perturbation",
+                metric=f"perturb_verdict_change_rate:P{name}",
+                value=rate, n=n, ci_low=lo_r, ci_high=hi_r,
+                protocol=agg_protocol, seed=seed, base=base, runtime=runtime,
+            ))
         return records
 
     def _run_capture_reference(

@@ -70,7 +70,7 @@ All four suites, tasks, and the `--config` keys they honor:
 | bdh_router_util | `adapters.bdh_router_util` | `router_utilization` | `repo`, `python`, `contexts`, `context_files`, `max_contexts`, `max_chars`, `block_size`, `mass_threshold`, `artifact_dir`, `seed`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
-| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `repeats` |
+| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress`, `perturbation` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `perturbations`, `repeats` |
 | null_model | `adapters.null_model` | `mmlu`, `humaneval` | `null_kind` (`stub`/`random`), `seed`, `mmlu_items`, `humaneval_items`, `exec_timeout` |
 | atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
 
@@ -277,7 +277,15 @@ echo logprobs), and `length_stress` (§3.3: fixed prompt(s) over a capped
 `stress_ok/refusal/loop/truncated/empty` flags plus per-prompt curve
 records `stress_failure_rate`, `stress_first_failure_at` (-1 = whole sweep
 clean), `stress_max_clean_chars`; optional per-prompt `expect` substring
-adds `stress_contains_expected`).
+adds `stress_contains_expected`), and `perturbation` (§3.5: per prompt,
+three small stated input perturbations — `ws_jitter` whitespace
+permutation, fixed-middle `token_sub`, `clause_swap` of the first two
+sentences — with token-set `perturb_jaccard` and whether the answer
+`perturb_verdict_changed` (last A–D letter when a `gold` is supplied,
+else the raw completion); per-(item, perturbation) `:P<op>@p<sha>` steps
+plus `perturb_mean_jaccard` / `perturb_verdict_change_rate` aggregates
+with Wald CIs. Catches a model that learned the surface, not the task —
+no generation budget beyond one extra pass per item, no long completions).
 
 ### atlas — weight diffs (`python -m adapters.atlas`)
 
