@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from store.runtime import runtime_digest
 from identity import hash_checkpoint, hash_model
 
 # The instrument script itself is vendored (byte-identical upstream copy).
@@ -745,6 +746,7 @@ class _Pi50AbliterationMixin:
                 "created_at": _now(),
                 "host": socket.gethostname(),
                 "script_sha256": _file_sha256(script) if script.is_file() else None,
+                "runtime_sha256": runtime_digest(),
                 "seed": seed,
                 "artifacts": list(artifacts) + artifact,
             }
@@ -964,6 +966,7 @@ class Pi50Adapter(SuiteAdapter, _Pi50AbliterationMixin):
                 "created_at": _now(),
                 "host": socket.gethostname(),
                 "script_sha256": _file_sha256(script),
+                "runtime_sha256": runtime_digest(),
                 "seed": seed,
                 "artifacts": artifact,
             }

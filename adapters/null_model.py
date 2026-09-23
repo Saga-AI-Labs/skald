@@ -196,6 +196,10 @@ class NullModelAdapter(SuiteAdapter):
             "created_at": _now(),
             "host": socket.gethostname(),
             "script_sha256": _self_sha256(),
+            # No runtime: the floor is defined runtime-independent, and
+            # stamping the local interpreter would fragment the fixed
+            # null-identity grouping (runtime-manifest spec §6).
+            "runtime_sha256": None,
             "seed": seed,
             "artifacts": [],
         }

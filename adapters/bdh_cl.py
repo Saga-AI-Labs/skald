@@ -38,6 +38,7 @@ from typing import Any
 
 from adapters import RECORD_FIELDS, SuiteAdapter
 from identity import hash_checkpoint
+from store.runtime import runtime_digest
 
 # Vendored BDH-CL evaluation subset (see vendor/bdh_cl/PIN.md). A fresh clone
 # works out of the box; point config["repo"] at an external BDH-CL checkout
@@ -319,6 +320,7 @@ class BdhClAdapter(SuiteAdapter):
                 "created_at": _now(),
                 "host": socket.gethostname(),
                 "script_sha256": _file_sha256(script),
+                "runtime_sha256": runtime_digest(),
                 "seed": seed,
                 "artifacts": artifact,
             }

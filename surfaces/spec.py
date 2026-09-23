@@ -22,7 +22,7 @@ from typing import Any
 from store.schema import FILTERABLE, RECORD_FIELDS
 
 SPEC_ID = "skald-functional-surface"
-SPEC_VERSION = "1"
+SPEC_VERSION = "2"
 SPEC_DESCRIPTION = (
     "Functional surface of the Skald result store: one declarative operation "
     "set shared by the api/ and ui/ surfaces (plan §3.1, §4.3), derived from "
@@ -38,25 +38,37 @@ SPEC_DESCRIPTION = (
 # the shape that invites that mistake.
 ANOMALY_RULE = "cross-protocol-checkpoint"
 
+# Second deterministic rule (runtime-manifest spec §5): a checkpoint measured
+# under one protocol but two or more distinct *known* runtimes is the same
+# hazard class — the numbers invite comparison but the serving path differed.
+# Records with runtime_sha256 None are unknown, never divergent.
+RUNTIME_ANOMALY_RULE = "cross-runtime-checkpoint"
+
 
 def flag_anomalies(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Flag records worth an anomaly view under :data:`ANOMALY_RULE`.
+    """Flag records worth an anomaly view under the deterministic rules.
 
-    Deterministic: entries are ordered by sorted checkpoint, protocols by
-    sorted label, and input order does not influence the result. Returns one
-    entry per flagged checkpoint:
+    Deterministic: entries are ordered by sorted checkpoint (then protocol),
+    protocols and runtimes by sorted label, and input order does not
+    influence the result. Returns:
 
-    - ``model_checkpoint_sha256`` — the checkpoint appearing under multiple
-      protocols,
-    - ``protocols`` — the distinct protocol labels, sorted,
-    - ``protocol_count`` — how many distinct protocols it spans,
-    - ``reason`` — always :data:`ANOMALY_RULE`.
+    - one entry per checkpoint appearing under multiple protocols
+      (``reason`` :data:`ANOMALY_RULE`, with ``protocols`` /
+      ``protocol_count``);
+    - one entry per (checkpoint, protocol) appearing under multiple distinct
+      non-null runtimes (``reason`` :data:`RUNTIME_ANOMALY_RULE`, with
+      ``protocol``, ``runtimes`` / ``runtime_count``).
     """
     by_checkpoint: dict[str, set[str]] = {}
+    by_checkpoint_protocol: dict[tuple[str, str], set[str]] = {}
     for record in records:
-        by_checkpoint.setdefault(
-            record["model_checkpoint_sha256"], set()
-        ).add(record["protocol"])
+        checkpoint = record["model_checkpoint_sha256"]
+        by_checkpoint.setdefault(checkpoint, set()).add(record["protocol"])
+        runtime = record.get("runtime_sha256")
+        if runtime is not None:
+            by_checkpoint_protocol.setdefault(
+                (checkpoint, record["protocol"]), set()
+            ).add(runtime)
 
     anomalies: list[dict[str, Any]] = []
     for checkpoint in sorted(by_checkpoint):
@@ -68,6 +80,18 @@ def flag_anomalies(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "protocols": protocols,
                     "protocol_count": len(protocols),
                     "reason": ANOMALY_RULE,
+                }
+            )
+    for checkpoint, protocol in sorted(by_checkpoint_protocol):
+        runtimes = sorted(by_checkpoint_protocol[(checkpoint, protocol)])
+        if len(runtimes) > 1:
+            anomalies.append(
+                {
+                    "model_checkpoint_sha256": checkpoint,
+                    "protocol": protocol,
+                    "runtimes": runtimes,
+                    "runtime_count": len(runtimes),
+                    "reason": RUNTIME_ANOMALY_RULE,
                 }
             )
     return anomalies
@@ -159,6 +183,12 @@ _FILTER_META: dict[str, tuple[str, str]] = {
     "created_at": ("string", "Record creation timestamp (RFC 3339, UTC)."),
     "host": ("string", "Host that ran the benchmark, or null."),
     "script_sha256": ("string", "SHA-256 of the generating script, or null."),
+    "runtime_sha256": (
+        "string",
+        "Digest over the normalised runtime manifest "
+        "(runtime-manifest spec), or null when unknown — filter on it, "
+        "never key on it.",
+    ),
     "seed": ("scalar", "Random seed (int or string), or null."),
 }
 
@@ -281,7 +311,8 @@ OPERATIONS: tuple[Operation, ...] = (
         id="list_anomalies",
         summary=(
             "Anomaly view (plan §4.3): records worth flagging under the "
-            "declared deterministic rule ANOMALY_RULE."
+            "declared deterministic rules ANOMALY_RULE and "
+            "RUNTIME_ANOMALY_RULE."
         ),
         request=_filter_parameters() + (_LIMIT,),
         response=RecordsResponse(

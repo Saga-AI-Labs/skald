@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from store.runtime import runtime_digest
 
 TASKS = {"diff"}
 
@@ -176,6 +177,7 @@ class AtlasAdapter(SuiteAdapter):
             "created_at": _now(),
             "host": socket.gethostname(),
             "script_sha256": _self_sha256(),
+            "runtime_sha256": runtime_digest(),
             "seed": seed,
             "artifacts": artifacts,
         }

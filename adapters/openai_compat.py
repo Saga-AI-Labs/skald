@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from store.runtime import runtime_digest
 
 TASKS = {"mmlu", "humaneval", "determinism"}
 
@@ -123,17 +124,22 @@ class OpenAICompatAdapter(SuiteAdapter):
         identity = hashlib.sha256(
             f"openai-compat::{base}::{served}".encode("utf-8")
         ).hexdigest()
+        # Serving-path facet (runtime-manifest spec §6): endpoint-observed
+        # facts plus the local interpreter. None-served degrades to a
+        # local-only digest, never a guess.
+        runtime = runtime_digest(served=client.server_facts())
         handlers = {
             "mmlu": self._run_mmlu,
             "humaneval": self._run_humaneval,
             "determinism": self._run_determinism,
         }
-        return handlers[task](client, served, base, identity, config)
+        return handlers[task](client, served, base, identity, runtime, config)
 
     # --- task handlers ----------------------------------------------------
 
     def _run_mmlu(
-        self, client: "_Client", served: str, base: str, identity: str, config: dict
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
     ) -> list[dict[str, Any]]:
         d = _DEFAULTS["mmlu"]
         nf = int(config.get("num_fewshot", d["num_fewshot"]))
@@ -194,11 +200,13 @@ class OpenAICompatAdapter(SuiteAdapter):
                 protocol=protocol,
                 seed=seed,
                 base=base,
+                runtime=runtime,
             )
         ]
 
     def _run_humaneval(
-        self, client: "_Client", served: str, base: str, identity: str, config: dict
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
     ) -> list[dict[str, Any]]:
         d = _DEFAULTS["humaneval"]
         ms = config.get("max_samples", d["max_samples"])
@@ -247,11 +255,13 @@ class OpenAICompatAdapter(SuiteAdapter):
                 protocol=protocol,
                 seed=seed,
                 base=base,
+                runtime=runtime,
             )
         ]
 
     def _run_determinism(
-        self, client: "_Client", served: str, base: str, identity: str, config: dict
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
     ) -> list[dict[str, Any]]:
         """Determinism probe (proposal §3.1): a gate, not a metric.
 
@@ -298,6 +308,7 @@ class OpenAICompatAdapter(SuiteAdapter):
                 protocol=protocol,
                 seed=seed,
                 base=base,
+                runtime=runtime,
             ),
             self._record(
                 identity=identity,
@@ -310,6 +321,7 @@ class OpenAICompatAdapter(SuiteAdapter):
                 protocol=protocol,
                 seed=seed,
                 base=base,
+                runtime=runtime,
             ),
             self._record(
                 identity=identity,
@@ -322,6 +334,7 @@ class OpenAICompatAdapter(SuiteAdapter):
                 protocol=protocol,
                 seed=seed,
                 base=base,
+                runtime=runtime,
             ),
         ]
         if len(distinct) > 1:
@@ -343,6 +356,7 @@ class OpenAICompatAdapter(SuiteAdapter):
                     protocol=protocol,
                     seed=seed,
                     base=base,
+                    runtime=runtime,
                 )
             )
         return records
@@ -351,7 +365,8 @@ class OpenAICompatAdapter(SuiteAdapter):
 
     def _record(self, *, identity: str, task: str, metric: str, value: float,
                 n: int | None, ci_low: float | None, ci_high: float | None,
-                protocol: str, seed: int, base: str) -> dict[str, Any]:
+                protocol: str, seed: int, base: str,
+                runtime: str | None) -> dict[str, Any]:
         record = {
             "model_checkpoint_sha256": identity,
             "adapter": "openai_compat",
@@ -366,6 +381,7 @@ class OpenAICompatAdapter(SuiteAdapter):
             "created_at": _now(),
             "host": socket.gethostname(),
             "script_sha256": _self_sha256(),
+            "runtime_sha256": runtime,
             "seed": seed,
             "artifacts": [f"endpoint::{base}"],
         }
@@ -399,6 +415,7 @@ class _Client:
         self.api_key = api_key
         self.timeout = timeout
         self.model = ""
+        self.last_headers: dict[str, str] = {}
 
     def _request(self, path: str, payload: dict | None) -> Any:
         url = self.base + path
@@ -411,6 +428,7 @@ class _Client:
         req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                self.last_headers = dict(resp.headers.items())
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise EndpointError(
@@ -434,6 +452,26 @@ class _Client:
             raise EndpointError(
                 f"openai_compat: /models returned no usable model id: {body!r}"
             ) from exc
+
+    def server_facts(self) -> dict[str, Any] | None:
+        """Endpoint-observed facts for the runtime manifest (spec §1).
+
+        Returns ``{"models": [...], "server": ...}`` from ``GET /models``,
+        or ``None`` when the endpoint cannot be introspected — the caller
+        then degrades to a local-only digest, never a guess.
+        """
+        try:
+            body = self._request("/models", None)
+            models = [m["id"] for m in body["data"] if isinstance(m, dict) and m.get("id")]
+        except (EndpointError, KeyError, TypeError):
+            return None
+        if not models:
+            return None
+        facts: dict[str, Any] = {"models": sorted(set(models))}
+        lowered = {k.lower(): v for k, v in self.last_headers.items()}
+        if lowered.get("server"):
+            facts["server"] = lowered["server"]
+        return facts
 
     def complete(self, prompt: str, max_tokens: int) -> str:
         body = self._request(

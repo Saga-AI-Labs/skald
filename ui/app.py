@@ -533,6 +533,28 @@ def _active_filters_summary(operation, values: dict[str, Any]) -> str:
     return f'<p class="meta">active filters: {chips}</p>'
 
 
+def _anomaly_card(a: dict[str, Any], directory) -> str:
+    """Render one anomaly entry (either deterministic rule shape)."""
+    head = (
+        f'<li class="anomaly"><a '
+        f'href="{_esc(_filter_link("model_checkpoint_sha256", a["model_checkpoint_sha256"]))}">'
+        f'{_esc(display_name(a["model_checkpoint_sha256"], directory))}</a> '
+        f'<span class="mono">{_esc(a["model_checkpoint_sha256"][:12])}…</span> — '
+    )
+    if "protocols" in a:
+        detail = (
+            f'{a["protocol_count"]} protocols '
+            f'({_esc(", ".join(a["protocols"]))})'
+        )
+    else:
+        short = ", ".join(f"{r[:12]}…" for r in a["runtimes"])
+        detail = (
+            f'{a["runtime_count"]} runtimes under protocol '
+            f'{_esc(a["protocol"])} ({_esc(short)})'
+        )
+    return head + detail + f' · {_esc(a["reason"])}</li>'
+
+
 def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any],
                   store=None) -> str:
     directory = load_directory()
@@ -564,16 +586,7 @@ def _records_view(operation, values: dict[str, Any], envelope: dict[str, Any],
             f'{"s" if envelope["count"] != 1 else ""} belonging to flagged '
             f"cross-protocol checkpoints</p>"
         )
-        cards = [
-            f'<li class="anomaly"><a '
-            f'href="{_esc(_filter_link("model_checkpoint_sha256", a["model_checkpoint_sha256"]))}">'
-            f'{_esc(display_name(a["model_checkpoint_sha256"], directory))}</a> '
-            f'<span class="mono">{_esc(a["model_checkpoint_sha256"][:12])}…</span> — '
-            f'{a["protocol_count"]} protocols '
-            f'({_esc(", ".join(a["protocols"]))})'
-            f' · {_esc(a["reason"])}</li>'
-            for a in envelope["anomalies"]
-        ]
+        cards = [_anomaly_card(a, directory) for a in envelope["anomalies"]]
         if cards:
             parts.append("<h3>Anomalies</h3><ul>" + "".join(cards) + "</ul>")
         else:

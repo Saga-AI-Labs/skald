@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from store.runtime import runtime_digest
 from identity import hash_model
 
 # Vendored Saga benchmark subset (see vendor/saga_benchmarks/PIN.md). A fresh
@@ -336,6 +337,7 @@ class SagaAdapter(SuiteAdapter):
                 "created_at": _now(),
                 "host": socket.gethostname(),
                 "script_sha256": _file_sha256(script) if script.is_file() else None,
+                "runtime_sha256": runtime_digest(),
                 "seed": seed,
                 "artifacts": artifact,
             }

@@ -76,6 +76,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters import RECORD_FIELDS, SuiteAdapter
+from store.runtime import runtime_digest
 from identity import hash_dir, hash_model
 
 DEFAULT_VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "jlens"
@@ -422,6 +423,7 @@ class JLensAdapter(SuiteAdapter):
                 "created_at": _now(),
                 "host": socket.gethostname(),
                 "script_sha256": payload["script_sha256"],
+                "runtime_sha256": runtime_digest(),
                 "seed": seed,
                 "artifacts": artifacts,
             }

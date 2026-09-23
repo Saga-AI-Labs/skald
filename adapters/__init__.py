@@ -30,6 +30,7 @@ RECORD_FIELDS = frozenset(
         "created_at",
         "host",
         "script_sha256",
+        "runtime_sha256",
         "seed",
         "artifacts",
     }

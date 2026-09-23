@@ -98,6 +98,7 @@ def test_schema_matches_plan_fields_and_rejects_unknown(tmp_path):
         "created_at",
         "host",
         "script_sha256",
+        "runtime_sha256",
         "seed",
         "artifacts",
     ]

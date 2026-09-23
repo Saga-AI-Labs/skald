@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS record_index (
     created_at             TEXT NOT NULL,
     host                   TEXT,
     script_sha256          TEXT,
+    runtime_sha256         TEXT,
     seed                   TEXT,
     artifacts              TEXT NOT NULL DEFAULT '[]',
     UNIQUE (run_id, row_id)
@@ -55,6 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_record_suite   ON record_index (suite);
 CREATE INDEX IF NOT EXISTS idx_record_task    ON record_index (task);
 CREATE INDEX IF NOT EXISTS idx_record_protocol ON record_index (protocol);
 CREATE INDEX IF NOT EXISTS idx_record_created ON record_index (created_at);
+CREATE INDEX IF NOT EXISTS idx_record_runtime ON record_index (runtime_sha256);
 """
 
 _INDEX_COLUMNS = ", ".join(RECORD_FIELDS)
@@ -76,7 +78,24 @@ class Store:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_CREATE_TABLES)
+            # Columns before indexes: old stores gain the column here so
+            # the index creation below never references a missing column.
+            self._migrate(conn)
             conn.executescript(_CREATE_INDEXES)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Additive index migrations for stores created before a column.
+
+        The JSON run files are the authoritative records and need no
+        migration; only the SQLite index gains columns. Each step is guarded
+        by a presence check so re-running is a no-op.
+        """
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(record_index)")
+        }
+        if "runtime_sha256" not in columns:
+            conn.execute("ALTER TABLE record_index ADD COLUMN runtime_sha256 TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -165,7 +184,13 @@ class Store:
                 loaded[run_id] = json.loads(
                     (self.runs_dir / f"{run_id}.json").read_text()
                 )
-            results.append(loaded[run_id]["records"][row_id])
+            record = loaded[run_id]["records"][row_id]
+            # Run files predate newer optional columns (no back-fill, per
+            # the runtime-manifest spec §4): default them on read and
+            # restore canonical order so records stay RECORD_FIELDS-exact.
+            for field in RECORD_FIELDS:
+                record.setdefault(field, None)
+            results.append({field: record[field] for field in RECORD_FIELDS})
             if limit is not None and len(results) >= limit:
                 break
         return results

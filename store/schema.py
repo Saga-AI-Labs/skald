@@ -25,6 +25,7 @@ RECORD_FIELDS: tuple[str, ...] = (
     "created_at",
     "host",
     "script_sha256",
+    "runtime_sha256",
     "seed",
     "artifacts",
 )
@@ -58,6 +59,7 @@ FILTERABLE = frozenset(
         "created_at",
         "host",
         "script_sha256",
+        "runtime_sha256",
         "seed",
     }
 )
@@ -142,6 +144,22 @@ def normalize(record: dict) -> dict:
                 raise ValidationError(f"{field} must be a string or null")
             else:
                 out[field] = value
+        elif field == "runtime_sha256":
+            # Derived, never typed (runtime-manifest spec §3): None means
+            # unknown; a present digest must be 64 lowercase hex, never prose.
+            if value is None:
+                out[field] = None
+            elif (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)
+            ):
+                raise ValidationError(
+                    "runtime_sha256 must be a 64-char lowercase hex "
+                    "digest or null"
+                )
+            else:
+                out[field] = value
         elif field == "seed":
             if value is None:
                 pass
@@ -170,6 +188,7 @@ def normalize(record: dict) -> dict:
     out.setdefault("created_at", utcnow())
     out.setdefault("host", socket.gethostname())
     out.setdefault("script_sha256", None)
+    out.setdefault("runtime_sha256", None)
     out.setdefault("seed", None)
     out.setdefault("artifacts", [])
 

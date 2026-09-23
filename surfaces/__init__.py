@@ -8,6 +8,7 @@ the ``store`` module, and declares operations without any per-surface branch.
 from .spec import (
     ANOMALY_RULE,
     OPERATIONS,
+    RUNTIME_ANOMALY_RULE,
     SPEC_DESCRIPTION,
     SPEC_ID,
     SPEC_VERSION,
@@ -23,6 +24,7 @@ from .spec import (
 
 __all__ = [
     "ANOMALY_RULE",
+    "RUNTIME_ANOMALY_RULE",
     "OPERATIONS",
     "SPEC_DESCRIPTION",
     "SPEC_ID",

@@ -319,6 +319,28 @@ def test_anomaly_view_renders_flagged_checkpoints(tmp_path):
     assert ANOMALY_RULE in page
 
 
+def test_anomaly_view_renders_runtime_divergence(tmp_path):
+    from surfaces.spec import RUNTIME_ANOMALY_RULE
+
+    store = seeded_store(
+        tmp_path,
+        [
+            bdh_record(runtime_sha256="a1" * 32),
+            bdh_record(value=21.5, runtime_sha256="b2" * 32),
+        ],
+    )
+
+    status, page = ui_call(store, "list_anomalies")
+
+    assert status == 200
+    ui_envelope = embedded(page)
+    assert ui_envelope["anomalies"][0]["reason"] == RUNTIME_ANOMALY_RULE
+    assert ui_envelope["anomalies"][0]["runtime_count"] == 2
+    # The human page names the shared protocol and the runtime rule.
+    assert PROTO_BDH in page
+    assert RUNTIME_ANOMALY_RULE in page
+
+
 # --- request validation parity -------------------------------------------------
 
 

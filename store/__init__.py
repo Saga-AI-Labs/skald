@@ -21,15 +21,19 @@ from pathlib import Path
 from typing import Any
 
 from .backend import Store
+from .runtime import collect_manifest, digest_manifest, runtime_digest
 from .schema import RECORD_FIELDS, ValidationError, normalize
 
 __all__ = [
     "Store",
     "RECORD_FIELDS",
     "ValidationError",
+    "collect_manifest",
+    "digest_manifest",
     "normalize",
     "put",
     "query",
+    "runtime_digest",
 ]
 
 _DEFAULT_STORE: Store | None = None

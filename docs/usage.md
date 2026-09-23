@@ -68,7 +68,8 @@ All four suites, tasks, and the `--config` keys they honor:
 | bdh_cl | `adapters.bdh_cl` | `router`, `domain_eval`, `p5_inchain` | `repo`, `python`, `routes`, `domains`, `window`, `crops`, `batch`, `oracle_routes`, `mb`, `iters`, `parent`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
-| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache` |
+| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `repeats` |
+| null_model | `adapters.null_model` | `mmlu`, `humaneval` | `null_kind` (`stub`/`random`), `seed`, `mmlu_items`, `humaneval_items`, `exec_timeout` |
 | atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
 
 ### Running benchmarks from the surfaces (no CLI needed)
@@ -349,9 +350,13 @@ Read-only, GET/HEAD only. Routes are generated from
 
 Filterable fields: `model_checkpoint_sha256`, `adapter`, `suite`, `task`,
 `metric`, `value`, `n`, `ci_low`, `ci_high`, `protocol`, `created_at`, `host`,
-`script_sha256`, `seed`. Every filter is an equality filter passed straight to
-`store.query`; `limit` bounds the number of records. Unknown parameters and
-missing required ones are rejected with 400.
+`script_sha256`, `runtime_sha256`, `seed`. Every filter is an equality filter
+passed straight to `store.query`; `limit` bounds the number of records.
+Unknown parameters and missing required ones are rejected with 400.
+`runtime_sha256` is the serving-path facet (digest over the normalised runtime
+manifest — interpreter, OS, endpoint-observed model list; see
+`docs/plans/2026-09-23_runtime-manifest-spec.md`): filter on it, never key on
+it. `null` means unknown.
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/list_suites_adapters
@@ -359,9 +364,12 @@ curl "http://127.0.0.1:8000/api/v1/query_results?adapter=pi50&limit=5"
 curl "http://127.0.0.1:8000/api/v1/task_drilldown?model_checkpoint_sha256=<sha>&task=manifest_check"
 ```
 
-`list_anomalies` implements the declared anomaly rule: any checkpoint that
-appears under two or more distinct `protocol` labels is flagged, because
-numbers from different protocols must never be silently compared.
+`list_anomalies` implements the declared deterministic rules: any checkpoint
+that appears under two or more distinct `protocol` labels is flagged, because
+numbers from different protocols must never be silently compared — and any
+(checkpoint, protocol) measured under two or more distinct known
+`runtime_sha256` digests is flagged as `cross-runtime-checkpoint`, the same
+hazard class through the serving path.
 
 ## Surface 2: HTML UI (`python -m ui`)
 
