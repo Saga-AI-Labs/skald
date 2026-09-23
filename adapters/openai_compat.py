@@ -91,7 +91,14 @@ _HUMANEVAL_DATASET = "openai/openai_humaneval"
 _HUMANEVAL_CONFIG = "openai_humaneval"
 
 _DEFAULTS = {
-    "mmlu": {"num_fewshot": 5, "max_samples": 100, "max_tokens": 64},
+    # Measured on GLM-5.3-Flash-EXL3 (6 items, 5-shot, seed 42), sweeping the
+    # budget: 64 -> 100% starved, silent chance-level score. 512 -> still 100%
+    # starved. 1024 and 2048 -> 0% starved. 4096 -> starvation RETURNS (0.33,
+    # then 0.17 on a repeat), because the server runs with
+    # --max-num-batched-tokens 2048: a request asking for more completion
+    # budget than the batched-token cap starves unpredictably.
+    # So the usable window is [1024, 2048]; 1024 is the safe pick, under the cap.
+    "mmlu": {"num_fewshot": 5, "max_samples": 100, "max_tokens": 1024},
     "humaneval": {"max_samples": 20, "max_tokens": 256},
     # Free-form math: no few-shot prefix (the corpus prompts are zero-shot by
     # construction), and a long budget because a worked solution is long.
@@ -243,22 +250,38 @@ class OpenAICompatAdapter(SuiteAdapter):
             raise EndpointError("openai_compat: mmlu fetched zero evaluation items")
         preamble = "".join(_mmlu_prompt(s, with_answer=True) for s in shots)
         hits = 0
+        answerable = 0
+        starved = 0
         for it in rest:
-            completion = client.complete(
+            # Score ``content`` ONLY, never the reasoning fallback: a thinking
+            # model that exhausts its budget leaves content empty and puts a
+            # restatement of the question -- options included -- into
+            # reasoning. Letting _LETTER_RE see that text manufactures answers
+            # the model never gave.
+            content, _reasoning, finish = client.answer_and_reasoning(
                 preamble + _mmlu_prompt(it, with_answer=False), mt
             )
-            # Last match wins: completions often echo the question (whose
-            # options contain A-D) before giving the final answer letter.
-            hits_here = _LETTER_RE.findall(completion or "")
-            if hits_here and hits_here[-1] == it["gold"]:
-                hits += 1
+            if finish == "length":
+                starved += 1
+            # Last match wins: content often echoes the question (whose options
+            # contain A-D) before giving the final answer letter.
+            hits_here = _LETTER_RE.findall(content or "")
+            if hits_here:
+                answerable += 1
+                if hits_here[-1] == it["gold"]:
+                    hits += 1
         n = len(rest)
+        # Accuracy is over ALL items, so truncation depresses it instead of
+        # being hidden by scoring only the items that happened to answer.
         score = hits / n
         ci_low, ci_high = _ci(score, n)
         protocol = (
             f"openai_compat mmlu via {base} model {served}: {nf}-shot "
             f"letter-choice accuracy {coverage}, temperature 0, max_tokens "
-            f"{mt}, seed {seed}. UNVERIFIED endpoint identity (model name "
+            f"{mt}, seed {seed}. Scored on content only; reasoning is never "
+            f"scanned for an answer letter. accuracy is over all {n} items, so "
+            f"a truncated item counts as wrong rather than being dropped. "
+            f"UNVERIFIED endpoint identity (model name "
             f"self-reported by server, not a weight hash) — never compare "
             f"with weighed-in records."
         )
@@ -275,7 +298,41 @@ class OpenAICompatAdapter(SuiteAdapter):
                 seed=seed,
                 base=base,
                 runtime=runtime,
-            )
+            ),
+            self._record(
+                identity=identity,
+                task="mmlu",
+                metric="answerable",
+                value=(answerable / n) if n else 0.0,
+                n=n,
+                ci_low=None,
+                ci_high=None,
+                protocol=(
+                    protocol + f". answerable {answerable}/{n} produced an "
+                    f"answer letter at all."
+                ),
+                seed=seed,
+                base=base,
+                runtime=runtime,
+            ),
+            self._record(
+                identity=identity,
+                task="mmlu",
+                metric="budget_starved",
+                value=(starved / n) if n else 0.0,
+                n=n,
+                ci_low=None,
+                ci_high=None,
+                protocol=(
+                    protocol + f". budget_starved {starved}/{n} hit "
+                    f"finish_reason=length. This is a BUDGET result: a starved "
+                    f"item is not evidence of model ignorance, so accuracy "
+                    f"alone must not be read as capability when it is high."
+                ),
+                seed=seed,
+                base=base,
+                runtime=runtime,
+            ),
         ]
 
     def _run_humaneval(

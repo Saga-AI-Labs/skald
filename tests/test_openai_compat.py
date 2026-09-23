@@ -56,6 +56,11 @@ class _Stub(BaseHTTPRequestHandler):
     math_answer: str | None = None
     fact_answer: str | None = None
     tool_script: list | None = None
+    # Opt-in thinking-model shape: empty content, the text in reasoning, and a
+    # caller-chosen finish_reason. Models this out of the code path where a
+    # scorer might mistake deliberation for an answer.
+    reasoning_answer: str | None = None
+    finish_reason: str | None = None
 
     def _json(self, body, status=200):
         payload = json.dumps(body).encode()
@@ -104,6 +109,13 @@ class _Stub(BaseHTTPRequestHandler):
             text = type(self).fact_answer
         else:
             text = "B"
+        if type(self).reasoning_answer is not None:
+            self._json({"choices": [{
+                "message": {"content": "",
+                            "reasoning_content": type(self).reasoning_answer},
+                "finish_reason": type(self).finish_reason or "stop",
+            }]})
+            return
         self._json({"choices": [{"message": {"content": text}}]})
 
     def _completions(self, req):
@@ -169,7 +181,9 @@ def test_mmlu_inline_items(endpoint):
         endpoint, "mmlu",
         {"model": "stub-model", "mmlu_items": MMLU_ITEMS, "num_fewshot": 1},
     )
-    assert len(records) == 1
+    assert [r["metric"] for r in records] == [
+        "accuracy", "answerable", "budget_starved"
+    ]
     r = records[0]
     assert set(r) == set(RECORD_FIELDS)
     assert r["adapter"] == "openai_compat" and r["task"] == "mmlu"
@@ -178,6 +192,35 @@ def test_mmlu_inline_items(endpoint):
     assert "UNVERIFIED" in r["protocol"]
     assert r["artifacts"] == [f"endpoint::{endpoint}"]
     assert re.fullmatch(r"[0-9a-f]{64}", r["model_checkpoint_sha256"])
+    # Buckets are reported alongside accuracy so a truncated run cannot be
+    # mistaken for a capability result.
+    assert records[1]["value"] == 1.0        # both stub items answered
+    assert records[2]["value"] == 0.0        # stub does not report truncation
+
+
+def test_mmlu_never_scores_reasoning_as_answer(endpoint):
+    """A thinking model that exhausts its budget echoes A-D in `reasoning`.
+    That must NOT be harvested for an answer letter."""
+    items = [
+        {"prompt": "Q", "choices": ["a", "b", "c", "d"], "gold": "B"},
+        {"prompt": "Q2", "choices": ["a", "b", "c", "d"], "gold": "B"},
+    ]
+    # content empty (budget went into thinking); the reasoning text contains a
+    # confident but wrong letter that the old code would have scored.
+    _Stub.reasoning_answer = "The answer is D."
+    _Stub.finish_reason = "length"
+    try:
+        records = _adapter().run(
+            endpoint, "mmlu",
+            {"model": "m", "mmlu_items": items, "num_fewshot": 0}
+        )
+    finally:
+        _Stub.reasoning_answer = None
+        _Stub.finish_reason = None
+    by = {r["metric"]: r for r in records}
+    assert by["accuracy"]["value"] == 0.0    # reasoning letter D ignored
+    assert by["answerable"]["value"] == 0.0  # no answer letter in content
+    assert by["budget_starved"]["value"] == 1.0
 
 
 def test_humaneval_inline_items(endpoint):

@@ -216,16 +216,22 @@ def test_openai_compat_records_carry_runtime_digest():
     base = f"http://127.0.0.1:{server.server_port}"
     config = {"model": "stub-model", "mmlu_items": MMLU_ITEMS, "num_fewshot": 1}
     try:
-        (record,) = OpenAICompatAdapter().run(base, "mmlu", config)
-        (again,) = OpenAICompatAdapter().run(base, "mmlu", config)
+        records = OpenAICompatAdapter().run(base, "mmlu", config)
+        again_records = OpenAICompatAdapter().run(base, "mmlu", config)
     finally:
         server.shutdown()
-    digest = record["runtime_sha256"]
-    assert digest is not None and len(digest) == 64
-    # Served facts are folded in: the digest differs from a local-only one
-    # and is stable across runs against the same endpoint.
-    assert digest != runtime_digest()
-    assert again["runtime_sha256"] == digest
+    # mmlu now emits accuracy + answerable + budget_starved; the digest is
+    # carried on every record, so check them all.
+    assert [r["metric"] for r in records] == [
+        "accuracy", "answerable", "budget_starved"
+    ]
+    for record, again in zip(records, again_records):
+        digest = record["runtime_sha256"]
+        assert digest is not None and len(digest) == 64
+        # Served facts are folded in: the digest differs from a local-only one
+        # and is stable across runs against the same endpoint.
+        assert digest != runtime_digest()
+        assert again["runtime_sha256"] == digest
 
 
 def test_null_model_records_carry_no_runtime():

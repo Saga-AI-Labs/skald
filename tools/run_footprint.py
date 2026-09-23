@@ -50,7 +50,16 @@ from pathlib import Path
 # Change any of these and you have a different benchmark, whose results are
 # not comparable with the runs recorded in the store.
 PINNED = {
-    "mmlu":      {"num_fewshot": 5, "max_samples": 100, "max_tokens": 64,
+    # mmlu max_tokens was 64 and was pure artifact: GLM spends the whole budget
+    # deliberating, content comes back empty, and the old scorer harvested a
+    # letter out of the echoed A-D options -- a chance-level score presented as
+    # accuracy. Measured sweep on GLM (6 items, 5-shot, seed 42):
+    #   64 -> 100% starved | 512 -> 100% starved | 1024 -> 0% | 2048 -> 0%
+    #   4096 -> starved again (0.33, then 0.17), because the server runs with
+    #   --max-num-batched-tokens 2048 and asking for more completion budget
+    #   than the batch cap starves items unpredictably.
+    # Usable window is [1024, 2048]; 1024 sits safely under the cap.
+    "mmlu":      {"num_fewshot": 5, "max_samples": 100, "max_tokens": 1024,
                   "subject_set": "reasoning"},
     # Budgets must clear the deliberation: this endpoint spends ~1100 tokens
     # thinking before it emits content, so a small max_tokens leaves content
