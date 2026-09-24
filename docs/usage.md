@@ -70,7 +70,7 @@ All four suites, tasks, and the `--config` keys they honor:
 | bdh_router_util | `adapters.bdh_router_util` | `router_utilization` | `repo`, `python`, `contexts`, `context_files`, `max_contexts`, `max_chars`, `block_size`, `mass_threshold`, `artifact_dir`, `seed`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
-| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress`, `perturbation`, `gsm8k`, `simpleqa`, `tool_use` | `model`, `api_key`, `timeout`, `echo_max_tokens`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `subject_set` (`default`/`reasoning`/`knowledge`/`footprint`), `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `gsm8k_items`, `simpleqa_items`, `data_dir`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `perturbations`, `repeats`, `steps`, `max_tool_calls`, `distractors`, `tool_error_rate`, `humaneval_test_plus`, `bundle_out`, `reference_bundle` |
+| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress`, `perturbation`, `gsm8k`, `simpleqa`, `tool_use`, `bbh`, `popqa` | `model`, `api_key`, `timeout`, `echo_max_tokens`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `subject_set` (`default`/`reasoning`/`knowledge`/`footprint`), `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `gsm8k_items`, `simpleqa_items`, `bbh_items`, `bbh_tasks`, `popqa_items`, `data_dir`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `perturbations`, `repeats`, `steps`, `max_tool_calls`, `distractors`, `tool_error_rate`, `humaneval_test_plus`, `bundle_out`, `reference_bundle` |
 | null_model | `adapters.null_model` | `mmlu`, `humaneval` | `null_kind` (`stub`/`random`), `seed`, `mmlu_items`, `humaneval_items`, `exec_timeout` |
 | atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
 
@@ -303,7 +303,28 @@ asserts via per-item `test_plus` or global `humaneval_test_plus`
 (EvalPlus-style edge asserts against the entry point; reported as
 `pass_at_1_plus` over the covered items, never folded into pass@1),
 and re-executes each passing solution twice (`flaky` flags
-randomness-dependent code). `mmlu` takes `subjects` explicitly
+randomness-dependent code).
+
+Two more vendored tasks (corpora under `vendor/bbh_popqa/`, PIN.md carries
+provenance + licenses; the adapter reads them offline, never the network):
+`bbh` (8 BBH reasoning tasks — tracking shuffled objects, logical
+deduction, date understanding, dyck; zero-shot, round-robin sampled across
+tasks so a cap still covers all of them; per-task `accuracy_<task>`
+records beside overall `accuracy`/`answerable`/`budget_starved`; `bbh_tasks`
+narrows the set, `bbh_items` supplies inline rows) and `popqa` (14k
+entity-centric factual questions bucketed to head/mid/tail by subject
+pageview; same containment scorer as simpleqa plus `accuracy_head/mid/tail`
+and `tail_gap` = head-minus-tail — the quant-sensitive number, positive
+when rare knowledge suffered more).
+
+```bash
+python -m adapters.openai_compat http://host:8888/v1 bbh \
+  --config '{"model": "my-served-model", "max_samples": 80}'
+python -m adapters.openai_compat http://host:8888/v1 popqa \
+  --config '{"model": "my-served-model", "max_samples": 150, "seed": 42}'
+```
+
+`mmlu` takes `subjects` explicitly
 or `subject_set` (`default` keeps the historical four subjects;
 `reasoning`, `knowledge`, `footprint` widen it). The local corpora live
 under `vendor/pi50_eval/data/` (`data_dir` overrides); a missing corpus

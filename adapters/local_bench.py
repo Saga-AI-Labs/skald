@@ -279,6 +279,149 @@ def score_factuality(items: list[dict], completions: list[str],
             "misses": misses[:25]}
 
 
+# --- BBH reasoning (vendored subset) ---------------------------------------
+# Eight multi-step tasks where the output is small but reaching it is not:
+# tracking shuffled objects (3/5/7), logical deduction (3/5/7), date
+# understanding, dyck languages. Two answer kinds, recorded per row at
+# vendor time: `letter` (options lettered A-H, gold is the letter) and
+# `text` (dyck: the gold IS the short bracket string; lettering an
+# 84-symbol alphabet would measure code-reading, not reasoning).
+
+BBH_TASKS: list[str] = [
+    "tracking_shuffled_objects_three_objects",
+    "tracking_shuffled_objects_five_objects",
+    "tracking_shuffled_objects_seven_objects",
+    "logical_deduction_three_objects",
+    "logical_deduction_five_objects",
+    "logical_deduction_seven_objects",
+    "date_understanding",
+    "dyck_languages",
+]
+POPQA_FILE = "popqa.jsonl"
+
+_BBH_DATA = Path(__file__).resolve().parent.parent / "vendor" / "bbh_popqa" / "data"
+POPQA_DIR = _BBH_DATA
+
+_BBH_LETTER_RE = re.compile(r"\b([A-H])\b")
+
+
+def bbh_file(task: str) -> str:
+    return f"bbh_{task}.jsonl"
+
+
+def load_bbh(task: str, *, data_dir: str | Path | None = None) -> list[dict]:
+    """Read one vendored BBH task file (raises, never returns []).
+
+    BBH rows carry ``input``/``choices``/``gold`` rather than a prebuilt
+    ``prompt`` (the prompt is built at run time by :func:`build_bbh_prompt`),
+    so they go through their own shape check instead of :func:`load_jsonl`.
+    """
+    root = Path(data_dir) if data_dir else _BBH_DATA
+    path = root / bbh_file(task)
+    if not path.is_file():
+        raise CorpusError(f"local_bench: corpus not found: {path}")
+    rows: list[dict] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as exc:
+            raise CorpusError(f"local_bench: {path}:{lineno} not JSON: {exc}") from exc
+        if (isinstance(obj, dict) and {"id", "task", "answer_kind", "input",
+                                       "choices", "gold"} <= set(obj)):
+            rows.append(obj)
+    if not rows:
+        raise CorpusError(f"local_bench: {path} held no usable rows")
+    return rows
+
+
+def build_bbh_prompt(item: dict) -> str:
+    """Zero-shot prompt for one BBH row. The construction is code, not data,
+    so a prompt change is a visible diff with a protocol echo -- not silent
+    drift in the committed rows (which carry the raw parts)."""
+    prefix = item.get("task_prefix") or ""
+    if item.get("answer_kind") == "text":
+        # Dyck: the symbol alphabet is visible in the input itself, so no
+        # 84-symbol listing burns context on every item.
+        return (f"{prefix}{item['input']}\n"
+                "Reply with only the exact continuation, no explanation.")
+    lines = [f"{prefix}{item['input']}", "Answer choices:"]
+    for i, choice in enumerate(item["choices"]):
+        lines.append(f"({chr(ord('A') + i)}) {choice}")
+    lines.append("Reply with only the letter of the correct answer.")
+    return "\n".join(lines)
+
+
+def _norm_exact(s: str) -> str:
+    """Case-insensitive whitespace-canonical form that KEEPS symbols.
+
+    The factuality _norm strips non-alphanumerics, which would delete a dyck
+    gold like ``] }`` down to the empty string. Text-kind BBH answers are
+    brackets, so they need their own normaliser.
+    """
+    return " ".join(str(s).lower().split())
+
+
+def score_bbh(items: list[dict], completions: list[str],
+              finishes: list[str | None] | None = None) -> dict[str, Any]:
+    """Score BBH rows. Returns correct/wrong/unanswered and accuracy.
+
+    Letter rows: last A-H match wins (completions echo the options first,
+    same discipline as MMLU). When no letter is present, exactly one
+    contained option still counts -- a model that concludes with the
+    sentence rather than its letter answered, just not in the requested
+    shape; zero or several matches is not an answer. Uppercase-only is
+    deliberate: it matches the MMLU instrument, and anything looser would
+    harvest letters out of prose.
+    Text rows (dyck): normalised equality, or a longer reply ENDING in the
+    gold (``... so the answer is ] }``). Single-character golds require
+    equality: any explanatory sentence can end in ``)`` by accident.
+    Accuracy is over ALL items, like every other task here.
+    """
+    n = len(items)
+    correct = unanswered = starved = 0
+    misses: list[dict] = []
+    for idx, (item, text) in enumerate(zip(items, completions)):
+        t = (text or "").strip()
+        if not t:
+            unanswered += 1
+            if finishes and idx < len(finishes) and finishes[idx] == "length":
+                starved += 1
+            misses.append({"id": item.get("id"), "why": "NO_ANSWER"})
+            continue
+        kind = item.get("answer_kind", "letter")
+        gold = item.get("gold") or ""
+        hit = False
+        if kind == "text":
+            nt, ng = _norm_exact(t), _norm_exact(gold)
+            hit = bool(ng) and (nt == ng or (len(ng) > 1 and nt.endswith(ng)))
+        else:
+            letters = _BBH_LETTER_RE.findall(t)
+            if letters:
+                hit = letters[-1] == gold
+            else:
+                # No letter: fall back to option containment, requiring
+                # exactly one match so ambiguity never earns credit.
+                normed = [_norm(c) for c in (item.get("choices") or [])]
+                got = _norm(t)
+                matched = [i for i, c in enumerate(normed) if c and c in got]
+                if len(matched) == 1:
+                    hit = matched[0] == item.get("gold_idx")
+        if hit:
+            correct += 1
+        else:
+            misses.append({"id": item.get("id"), "why": "WRONG",
+                           "gold": str(gold)[:60], "saw": t[:120]})
+    wrong = n - correct - unanswered
+    return {"n": n, "correct": correct, "wrong": wrong,
+            "unanswered": unanswered, "budget_starved": starved,
+            "accuracy": (correct / n) if n else 0.0,
+            "answerable": ((n - unanswered) / n) if n else 0.0,
+            "misses": misses[:25]}
+
+
 # --- multi-step tool use ---------------------------------------------------
 # The agentic axis. There is no published agentic corpus on disk and the
 # datasets server mirrors only the two datasets this adapter already used, so

@@ -78,7 +78,7 @@ from store.runtime import runtime_digest
 
 TASKS = {"mmlu", "humaneval", "determinism", "capture_reference",
          "likelihood_parity", "length_stress", "perturbation",
-         "gsm8k", "simpleqa", "tool_use"}
+         "gsm8k", "simpleqa", "tool_use", "bbh", "popqa"}
 
 _DEFAULT_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 _MMLU_DATASET = "cais/mmlu"
@@ -113,6 +113,8 @@ _DEFAULTS = {
     "tool_use": {"max_samples": 20, "max_tokens": 256, "steps": 6,
                  "max_tool_calls": 24, "distractors": True,
                  "tool_error_rate": 0.0},
+    "bbh": {"max_samples": 240, "max_tokens": 2048},
+    "popqa": {"max_samples": 300, "max_tokens": 2048},
 }
 _SEED = 42
 _EXEC_TIMEOUT = 10  # per-case watchdog for executing generated HumanEval code
@@ -212,6 +214,8 @@ class OpenAICompatAdapter(SuiteAdapter):
             "gsm8k": self._run_gsm8k,
             "simpleqa": self._run_simpleqa,
             "tool_use": self._run_tool_use,
+            "bbh": self._run_bbh,
+            "popqa": self._run_popqa,
         }
         return handlers[task](client, served, base, identity, runtime, config)
 
@@ -1123,6 +1127,199 @@ class OpenAICompatAdapter(SuiteAdapter):
                       f" (max_tokens {mt}). A zero here with a high"
                       f" budget_starved is a BUDGET result, not evidence that"
                       f" the model lacks the fact"),
+            seed=seed, base=base, runtime=runtime,
+        ))
+        return recs
+
+    def _run_bbh(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """BBH reasoning subset: multi-step chains with small outputs.
+
+        Eight vendored tasks (tracking shuffled objects, logical deduction,
+        date understanding, dyck). Sampling is round-robin across tasks in
+        fixed order, so a capped run still covers every task instead of
+        exhausting the biggest file first. Per-task accuracy records sit
+        beside the overall number: a quantised model typically keeps the
+        3-object tasks and loses the 7-object ones first, and that shape is
+        the signal.
+        """
+        d = _DEFAULTS["bbh"]
+        ms = config.get("max_samples", d["max_samples"])
+        ms = int(ms) if ms is not None else None
+        mt = int(config.get("max_tokens", d["max_tokens"]))
+        seed = int(config.get("seed", _SEED))
+        inline = config.get("bbh_items")
+        groups: dict[str, list[dict]]
+        if inline is not None:
+            groups = {}
+            for it in inline:
+                groups.setdefault(it.get("task", "inline"), []).append(it)
+        else:
+            tasks = config.get("bbh_tasks") or list(local_bench.BBH_TASKS)
+            unknown = [t for t in tasks if t not in local_bench.BBH_TASKS]
+            if unknown:
+                raise ValueError(
+                    "openai_compat: unknown bbh_tasks "
+                    f"{unknown}; choose from {local_bench.BBH_TASKS}")
+            data_dir = config.get("data_dir")
+            groups = {t: local_bench.load_bbh(t, data_dir=data_dir)
+                      for t in tasks}
+        if not any(groups.values()):
+            raise EndpointError("openai_compat: bbh has zero evaluation items")
+        # Round-robin in fixed task order: deterministic, every task
+        # represented under a cap.
+        pool: list[dict] = []
+        idx = 0
+        order = sorted(groups)
+        while ms is None or len(pool) < ms:
+            progress = False
+            for t in order:
+                if ms is not None and len(pool) >= ms:
+                    break
+                if idx < len(groups[t]):
+                    pool.append(groups[t][idx])
+                    progress = True
+            if not progress:
+                break
+            idx += 1
+        prompts = [local_bench.build_bbh_prompt(it) for it in pool]
+        # content only, never the reasoning fallback (same discipline as
+        # mmlu/gsm8k: deliberation is not the answer)
+        pairs = [client.answer_and_reasoning(pr, mt) for pr in prompts]
+        by_task: dict[str, dict] = {}
+        for t in order:
+            sub = [(it, p, f) for it, (p, _r, f) in zip(pool, pairs)
+                   if it.get("task", "inline") == t]
+            if not sub:
+                continue
+            by_task[t] = local_bench.score_bbh(
+                [it for it, _p, _f in sub], [p for _it, p, _f in sub],
+                [f for _it, _p, f in sub])
+        total_n = sum(s["n"] for s in by_task.values())
+        total_correct = sum(s["correct"] for s in by_task.values())
+        total_unanswered = sum(s["unanswered"] for s in by_task.values())
+        total_starved = sum(s["budget_starved"] for s in by_task.values())
+        acc = (total_correct / total_n) if total_n else 0.0
+        ci_low, ci_high = _ci(acc, total_n)
+        protocol = (
+            f"openai_compat bbh via {base} model {served}: {len(by_task)} "
+            f"BBH tasks ({','.join(sorted(by_task))}), {total_n} items "
+            f"round-robin sampled, zero-shot letter-or-symbol answers scored "
+            f"exact, temperature 0, max_tokens {mt}, seed {seed}. Letter rows: "
+            f"last A-H match wins, single-option containment fallback; dyck "
+            f"text rows: normalised equality. Accuracy is over all items. "
+            f"UNVERIFIED endpoint identity (model name self-reported by "
+            f"server, not a weight hash) -- never compare with weighed-in "
+            f"records."
+        )
+        recs = [self._record(
+            identity=identity, task="bbh", metric="accuracy",
+            value=acc, n=total_n, ci_low=ci_low, ci_high=ci_high,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        )]
+        recs.append(self._record(
+            identity=identity, task="bbh", metric="answerable",
+            value=((total_n - total_unanswered) / total_n) if total_n else 0.0,
+            n=total_n, ci_low=None, ci_high=None,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        ))
+        recs.append(self._record(
+            identity=identity, task="bbh", metric="budget_starved",
+            value=(total_starved / total_n) if total_n else 0.0,
+            n=total_n, ci_low=None, ci_high=None,
+            protocol=(protocol + ". budget_starved: truncated items count "
+                      "as failures in accuracy, not exclusions."),
+            seed=seed, base=base, runtime=runtime,
+        ))
+        for t in sorted(by_task):
+            s = by_task[t]
+            tci, tch = _ci(s["accuracy"], s["n"])
+            recs.append(self._record(
+                identity=identity, task="bbh", metric=f"accuracy_{t}",
+                value=s["accuracy"], n=s["n"], ci_low=tci, ci_high=tch,
+                protocol=protocol, seed=seed, base=base, runtime=runtime,
+            ))
+        return recs
+
+    def _run_popqa(
+        self, client: "_Client", served: str, base: str, identity: str,
+        runtime: str | None, config: dict
+    ) -> list[dict[str, Any]]:
+        """PopQA: popularity-stratified short factuality.
+
+        Same containment scorer as simpleqa, but every row carries its
+        subject-pageview bucket (head/mid/tail tertiles, cut in the vendor
+        script and recorded in its manifest). The head-vs-tail gap is the
+        quant-sensitive number: aggressive rounding prunes rare knowledge
+        first, so the gap -- not the headline -- is what separates a
+        well-preserved quant from a damaged one. Sampling is a seeded
+        shuffle, preserving the bucket mix.
+        """
+        d = _DEFAULTS["popqa"]
+        ms = config.get("max_samples", d["max_samples"])
+        ms = int(ms) if ms is not None else None
+        mt = int(config.get("max_tokens", d["max_tokens"]))
+        seed = int(config.get("seed", _SEED))
+        items = config.get("popqa_items") or local_bench.load_jsonl(
+            local_bench.POPQA_FILE,
+            data_dir=config.get("data_dir") or local_bench.POPQA_DIR)
+        rng = random.Random(f"popqa-{seed}")
+        rng.shuffle(items)
+        if ms is not None:
+            items = items[:ms]
+        if not items:
+            raise EndpointError("openai_compat: popqa has zero evaluation items")
+        prompts = [f"Answer with a short factual phrase, no explanation."
+                   f"\n\n{it['prompt']}" for it in items]
+        pairs = [client.answer_and_reasoning(pr, mt) for pr in prompts]
+        contents = [p for p, _r, _f in pairs]
+        reasonings = [r for _p, r, _f in pairs]
+        buckets: dict[str, tuple[list, list, list]] = {}
+        for it, c, r in zip(items, contents, reasonings):
+            b = buckets.setdefault(it.get("bucket", "mid"), ([], [], []))
+            b[0].append(it)
+            b[1].append(c)
+            b[2].append(r)
+        scored = {b: local_bench.score_factuality(*v) for b, v in buckets.items()}
+        overall = local_bench.score_factuality(items, contents, reasonings)
+        head = scored.get("head", {"accuracy": 0.0, "n": 0})
+        mid = scored.get("mid", {"accuracy": 0.0, "n": 0})
+        tail = scored.get("tail", {"accuracy": 0.0, "n": 0})
+        gap = head["accuracy"] - tail["accuracy"]
+        ns = ", ".join(f"{b}={scored[b]['n']}" for b in ("head", "mid", "tail")
+                       if b in scored)
+        protocol = (
+            f"openai_compat popqa via {base} model {served}: short-form "
+            f"factuality over {overall['n']} seeded-shuffled items "
+            f"({ns}), normalised-containment scoring (SOFTER than exact "
+            f"match), temperature 0, max_tokens {mt}, seed {seed}. "
+            f"tail_gap is head-minus-tail accuracy: the quant-sensitive "
+            f"number, positive when rare knowledge suffered more. "
+            f"UNVERIFIED endpoint identity (model name self-reported by "
+            f"server, not a weight hash) -- never compare with weighed-in "
+            f"records."
+        )
+        recs = [self._record(
+            identity=identity, task="popqa", metric="accuracy",
+            value=overall["accuracy"], n=overall["n"],
+            ci_low=ci, ci_high=ch,
+            protocol=protocol, seed=seed, base=base, runtime=runtime,
+        ) for ci, ch in [_ci(overall["accuracy"], overall["n"])]]
+        for name, s in (("accuracy_head", head), ("accuracy_mid", mid),
+                        ("accuracy_tail", tail)):
+            recs.append(self._record(
+                identity=identity, task="popqa", metric=name,
+                value=s["accuracy"], n=s["n"], ci_low=None, ci_high=None,
+                protocol=protocol, seed=seed, base=base, runtime=runtime,
+            ))
+        recs.append(self._record(
+            identity=identity, task="popqa", metric="tail_gap",
+            value=gap, n=head["n"] + tail["n"], ci_low=None, ci_high=None,
+            protocol=(protocol + f". tail_gap {gap:+.3f} = head "
+                      f"{head['accuracy']:.3f} (n={head['n']}) minus tail "
+                      f"{tail['accuracy']:.3f} (n={tail['n']})."),
             seed=seed, base=base, runtime=runtime,
         ))
         return recs

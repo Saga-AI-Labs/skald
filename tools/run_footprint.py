@@ -18,11 +18,12 @@ them bit me in practice:
 
 Axes covered (see docs/plans/2026-09-23_benchmark-coverage-and-new-tasks.md):
 
-    coding            humaneval        execution-verified pass@1
+    coding            humaneval        execution-verified pass@1 (+flaky, +plus)
     math              gsm8k            free-form worked solutions (NOT multiple choice)
-    logic/reasoning   mmlu             subject_set=reasoning (formal_logic, fallacies, maths)
+    logic/reasoning   mmlu + bbh       reasoning subjects + 8 BBH chains (per-task records)
     general knowledge mmlu + simpleqa  knowledge subjects + short-form factuality
-    agentic           tool_use         multi-step tool driving + termination
+                      + popqa          popularity-stratified factuality (tail_gap)
+    agentic           tool_use         multi-step tool driving + selection + recovery
     (gate)            determinism      reproducibility at temperature 0
 
 Usage
@@ -68,6 +69,14 @@ PINNED = {
     "gsm8k":     {"max_samples": 50, "max_tokens": 2048},
     "simpleqa":  {"max_samples": 50, "max_tokens": 2048},
     "humaneval": {"max_samples": 20, "max_tokens": 320},
+    # BBH: 8 tasks round-robin, ~30 items each at the default cap. Per-task
+    # records land beside the overall number; the 3-vs-7-object shape is
+    # the quant signal, so keep every task represented (see _run_bbh).
+    "bbh":       {"max_samples": 240, "max_tokens": 2048},
+    # PopQA: seeded shuffle preserves the head/mid/tail mix; the gap, not
+    # the headline, is what separates quants. 300 items keeps head+tail CIs
+    # usable without an overnight run.
+    "popqa":     {"max_samples": 300, "max_tokens": 2048},
     # steps stays 4 (not the adapter default 6): the footprint pins what it
     # measures. distractors/error_rate are pinned explicitly for the same
     # reason -- an adapter-side default change must never silently re-scope
@@ -82,7 +91,8 @@ SEED = 42
 # *this* shape of request, so it should look like the scored tasks.
 DET_PROMPT = ("A train travels 60 km/h for 30 minutes. How far does it go? "
               "Work it out step by step, then give the answer as '#### <number>'.")
-ORDER = ["determinism", "gsm8k", "mmlu", "simpleqa", "humaneval", "tool_use"]
+ORDER = ["determinism", "gsm8k", "mmlu", "bbh", "simpleqa", "popqa",
+         "humaneval", "tool_use"]
 
 
 def _post(api: str, op: str, payload: dict) -> dict:

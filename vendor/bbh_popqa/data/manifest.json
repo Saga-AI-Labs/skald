@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-09-24T03:21:48.413232+00:00",
+  "generator": "tools/vendor_bbh_popqa.py (one-shot, network at vendor time only)",
+  "bbh": {
+    "source": "lighteval/bbh via public datasets-server rows API",
+    "upstream": "BIG-bench Apache-2.0 family, arXiv:2210.09261; maveriq/bigbenchhard mirror tags MIT",
+    "license_note": "both upstream claims recorded, not resolved; no license tag on the lighteval mirror",
+    "tasks": {
+      "tracking_shuffled_objects_three_objects": {
+        "rows": 300,
+        "sha256": "742bbdce2ac05490d9b58b89a13100c24e3ea952d1be1f09409c9095fc517d5d"
+      },
+      "tracking_shuffled_objects_five_objects": {
+        "rows": 1250,
+        "sha256": "61343b6e29cdc97189f2be229d68926ee66737cae2dcd0975c8ffc5ed3e058b8"
+      },
+      "tracking_shuffled_objects_seven_objects": {
+        "rows": 1750,
+        "sha256": "1996f502242f6b12cea7cec07c39a70b6b893000f6a197438daa5d6bfc78018c"
+      },
+      "logical_deduction_three_objects": {
+        "rows": 300,
+        "sha256": "82ab6ec725a2641e7c0101d36bcf764820794fde2055ea4b692f5ec6d55fedbf"
+      },
+      "logical_deduction_five_objects": {
+        "rows": 500,
+        "sha256": "550faf901b0652a53488e276e636c11de687ec32e064eeab833b39e886620b0a"
+      },
+      "logical_deduction_seven_objects": {
+        "rows": 700,
+        "sha256": "84d3cae9f23ab29063202de697f1bef20f22e7fb0d67d3bd5f4b39845478faea"
+      },
+      "date_understanding": {
+        "rows": 369,
+        "sha256": "0d90017eac3fe8ddeeb9bfe4da5a7badf5ee36ccb4f6c2eed0a818f3eeaaa30d"
+      },
+      "dyck_languages": {
+        "rows": 1000,
+        "sha256": "b0d23b606b8465f6372de98dadfc4553a2afcf0e18f1af3df01b4fca5fb278eb"
+      }
+    }
+  },
+  "popqa": {
+    "source": "akariasai/PopQA test.tsv",
+    "upstream": "upstream repo AlexTMallen/adaptive-retrieval carries an MIT LICENSE covering the repo including data/popQA.tsv; the HF mirror states no license",
+    "license_note": "both claims recorded, not resolved",
+    "rows": 14267,
+    "sha256": "991e9187ee24fc627312eff0e68b413793764edf1cf35b93e787183ebc54252b",
+    "s_pop_tertile_cutoffs": [
+      375.0,
+      2879.0
+    ],
+    "bucket_counts": {
+      "tail": 4750,
+      "head": 4755,
+      "mid": 4762
+    },
+    "alt_filter": "drop empty, <2 chars, or strict substring of another alt"
+  }
+}

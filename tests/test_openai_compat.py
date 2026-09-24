@@ -868,6 +868,96 @@ def test_simpleqa_measures_factuality(endpoint):
     assert "SOFTER" in r["protocol"]
 
 
+def test_score_bbh_letter_and_text():
+    """BBH scoring without an endpoint: letter extraction, the containment
+    fallback, dyck equality, and the empty-content bucket."""
+    letter = {"id": "t:1", "task": "t", "answer_kind": "letter",
+              "input": "q", "choices": ["The black book.", "The blue book."],
+              "gold": "B", "gold_idx": 1}
+    assert local_bench.score_bbh([letter], ["... so B"])["accuracy"] == 1.0
+    # last letter wins: options echoed first, answer last
+    assert local_bench.score_bbh([letter], ["A ... B"])["accuracy"] == 1.0
+    assert local_bench.score_bbh([letter], ["A ... A"])["accuracy"] == 0.0
+    # no letter: exactly one contained option still counts ...
+    s = local_bench.score_bbh([letter], ["The blue book."])
+    assert s["accuracy"] == 1.0
+    # ... but ambiguity never earns credit
+    s = local_bench.score_bbh([letter], ["The black book. The blue book."])
+    assert s["accuracy"] == 0.0
+    text = {"id": "d:1", "task": "dyck", "answer_kind": "text",
+            "input": "{ [", "choices": [")", "]", "}"], "gold": "]"}
+    assert local_bench.score_bbh([text], ["]"])["accuracy"] == 1.0
+    # single-char golds need equality: prose ending in ")" is not an answer
+    assert local_bench.score_bbh([text], ["see above)"])["accuracy"] == 0.0
+    text2 = dict(text, gold="] }")
+    assert local_bench.score_bbh([text2], ["so the answer is ] }"]
+                                 )["accuracy"] == 1.0
+    s = local_bench.score_bbh([letter, text], ["B", ""])
+    assert (s["accuracy"], s["unanswered"]) == (0.5, 1)
+
+
+def test_bbh_inline_items(endpoint):
+    """BBH through the adapter: stub answers B, golds are B."""
+    items = [
+        {"id": "t:1", "task": "tracking", "answer_kind": "letter",
+         "input": "q1", "choices": ["x", "y"], "gold": "B", "gold_idx": 1},
+        {"id": "t:2", "task": "tracking", "answer_kind": "letter",
+         "input": "q2", "choices": ["x", "y"], "gold": "B", "gold_idx": 1},
+    ]
+    records = _adapter().run(
+        endpoint, "bbh",
+        {"model": "stub-model", "bbh_items": items, "max_tokens": 64})
+    by = {r["metric"]: r for r in records}
+    assert by["accuracy"]["value"] == 1.0
+    assert by["accuracy"]["task"] == "bbh"
+    assert by["accuracy_tracking"]["value"] == 1.0
+    assert by["answerable"]["value"] == 1.0
+    assert by["budget_starved"]["value"] == 0.0
+
+
+def test_popqa_stratified_gap(endpoint):
+    """PopQA head-vs-tail: the stub knows Paris (head) but not Ulm (tail),
+    so the gap metric reads 1.0 -- the shape a damaged quant would show."""
+    _Stub.fact_answer = "Paris"
+    try:
+        items = [
+            {"id": "popqa:1", "prompt": "Capital of France?",
+             "gold": "Paris", "gold_alts": [], "s_pop": 50000,
+             "bucket": "head"},
+            {"id": "popqa:2", "prompt": "Birthplace of Someone Obscure?",
+             "gold": "Ulm", "gold_alts": [], "s_pop": 12, "bucket": "tail"},
+        ]
+        records = _adapter().run(
+            endpoint, "popqa",
+            {"model": "stub-model", "popqa_items": items, "max_tokens": 64})
+    finally:
+        _Stub.fact_answer = None
+    by = {r["metric"]: r for r in records}
+    assert set(by) == {"accuracy", "accuracy_head", "accuracy_mid",
+                       "accuracy_tail", "tail_gap"}
+    assert by["accuracy_head"]["value"] == 1.0
+    assert by["accuracy_tail"]["value"] == 0.0
+    assert by["tail_gap"]["value"] == 1.0
+    assert "tail_gap" in by["accuracy"]["protocol"]
+
+
+def test_bbh_popqa_vendor_files_load():
+    """The committed corpora load with the fields the tasks require."""
+    for task in local_bench.BBH_TASKS:
+        rows = local_bench.load_bbh(task)
+        assert len(rows) > 0, task
+        r = rows[0]
+        assert {"id", "task", "answer_kind", "input", "choices",
+                "gold"} <= set(r), task
+    pop = local_bench.load_jsonl(local_bench.POPQA_FILE,
+                                 data_dir=local_bench.POPQA_DIR)
+    assert len(pop) > 10000
+    buckets = {r["bucket"] for r in pop}
+    assert buckets == {"head", "mid", "tail"}
+    r = pop[0]
+    assert {"prompt", "gold", "s_pop", "bucket"} <= set(r)
+
+
 def test_tool_use_drives_a_real_tool_loop(endpoint):
     """The agentic axis: issue calls, carry observations forward, terminate.
 
