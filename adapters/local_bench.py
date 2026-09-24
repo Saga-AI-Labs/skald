@@ -29,6 +29,7 @@ governs the ``NO_ANSWER`` bucket.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -341,8 +342,53 @@ def run_calc(expr: str) -> float | str:
     return value
 
 
-def build_task(seed: int, steps: int) -> tuple[str, list[dict], float]:
-    """Return (prompt, terms, gold) for one multi-step tool-use item."""
+ESTIMATE_SCHEMA = [{
+    "type": "function",
+    "function": {
+        "name": "estimate",
+        "description": "Return a ROUGH order-of-magnitude estimate of an "
+                       "arithmetic expression (2 significant figures). NEVER "
+                       "exact -- for scoping only, not for answers.",
+        "parameters": {
+            "type": "object",
+            "properties": {"expr": {"type": "string", "description": "e.g. (3+4)*2"}},
+            "required": ["expr"],
+        },
+    },
+}]
+
+TOOL_SCHEMAS = {"calc": CALC_SCHEMA, "estimate": ESTIMATE_SCHEMA}
+
+
+def run_estimate(expr: str) -> float | str:
+    """Rough evaluation for the estimate distractor tool.
+
+    Same input gate as :func:`run_calc` (untrusted model input), then the
+    exact value rounded to 2 significant figures. Error strings pass through
+    unchanged so a malformed call is visibly an error, not a number.
+    """
+    exact = run_calc(expr)
+    if isinstance(exact, str):
+        return exact
+    if exact == 0:
+        return 0.0
+    mag = math.floor(math.log10(abs(float(exact))))
+    return float(round(exact, -mag + 1))
+
+
+TOOL_RUNNERS = {"calc": run_calc, "estimate": run_estimate}
+
+
+def build_task(seed: int, steps: int,
+               tools: tuple[str, ...] | list[str] = ("calc",)
+               ) -> tuple[str, list[dict], float]:
+    """Return (prompt, terms, gold) for one multi-step tool-use item.
+
+    ``tools`` names the toolbox the prompt offers. With ``("calc",)`` the
+    prompt is the original calc-only text; naming ``"estimate"`` as well
+    adds the distractor with an explicit never-exact warning, so the item
+    measures tool *selection* as well as tool driving.
+    """
     import random
 
     rng = random.Random(f"tooluse-{seed}")
@@ -355,13 +401,26 @@ def build_task(seed: int, steps: int) -> tuple[str, list[dict], float]:
         acc = {"+": lambda a, b: a + b, "-": lambda a, b: a - b,
                "*": lambda a, b: a * b}[op](acc, operand)
         terms.append({"step": i + 1, "op": op, "operand": operand})
-    lines = [
-        "You must use the calc tool for every arithmetic step; do not compute",
-        "in your head. Work the chain IN ORDER, one calc call per step, each",
-        "step starting from the result of the previous step.",
-        "",
-        f"STARTING VALUE: {int(start)}",
-    ]
+    names = list(tools) or ["calc"]
+    if names == ["calc"]:
+        lines = [
+            "You must use the calc tool for every arithmetic step; do not compute",
+            "in your head. Work the chain IN ORDER, one calc call per step, each",
+            "step starting from the result of the previous step.",
+            "",
+            f"STARTING VALUE: {int(start)}",
+        ]
+    else:
+        lines = [
+            "You have these tools: calc (exact arithmetic) and estimate "
+            "(a ROUGH approximation, never exact -- for scoping only).",
+            "You must use the calc tool for every arithmetic step; do not compute",
+            "in your head and NEVER use an estimate result as a step value or",
+            "as the final answer. Work the chain IN ORDER, one calc call per",
+            "step, each step starting from the result of the previous step.",
+            "",
+            f"STARTING VALUE: {int(start)}",
+        ]
     for t in terms:
         lines.append(f"  Step {t['step']}: {t['op']} {t['operand']}")
     lines += ["", "When the chain is finished, reply with only the final",

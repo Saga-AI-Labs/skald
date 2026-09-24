@@ -68,8 +68,13 @@ PINNED = {
     "gsm8k":     {"max_samples": 50, "max_tokens": 2048},
     "simpleqa":  {"max_samples": 50, "max_tokens": 2048},
     "humaneval": {"max_samples": 20, "max_tokens": 320},
+    # steps stays 4 (not the adapter default 6): the footprint pins what it
+    # measures. distractors/error_rate are pinned explicitly for the same
+    # reason -- an adapter-side default change must never silently re-scope
+    # recorded runs.
     "tool_use":  {"max_samples": 12, "steps": 4, "max_tool_calls": 24,
-                  "max_tokens": 320},
+                  "max_tokens": 320, "distractors": True,
+                  "tool_error_rate": 0.0},
     "determinism": {"repeats": 6, "max_tokens": 320},
 }
 SEED = 42

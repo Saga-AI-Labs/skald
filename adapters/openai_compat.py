@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import re
 import signal
 import socket
@@ -109,8 +110,9 @@ _DEFAULTS = {
     # rather than leaving it to be misread as ignorance.
     "gsm8k": {"max_samples": 100, "max_tokens": 2048},
     "simpleqa": {"max_samples": 100, "max_tokens": 2048},
-    "tool_use": {"max_samples": 20, "max_tokens": 256, "steps": 4,
-                 "max_tool_calls": 24},
+    "tool_use": {"max_samples": 20, "max_tokens": 256, "steps": 6,
+                 "max_tool_calls": 24, "distractors": True,
+                 "tool_error_rate": 0.0},
 }
 _SEED = 42
 _EXEC_TIMEOUT = 10  # per-case watchdog for executing generated HumanEval code
@@ -359,9 +361,13 @@ class OpenAICompatAdapter(SuiteAdapter):
             items = items[:ms]
         if not items:
             raise EndpointError("openai_compat: humaneval fetched zero problems")
+        plus_global = config.get("humaneval_test_plus")
         passed = 0
         starved = 0
         no_code = 0
+        flaky = 0
+        strict = 0
+        n_plus = 0
         for p in items:
             # Score ``content`` ONLY. ``complete()`` falls back onto the
             # reasoning fields, so on a thinking model that exhausts its
@@ -376,8 +382,23 @@ class OpenAICompatAdapter(SuiteAdapter):
                 starved += 1
             if not (content or "").strip():
                 no_code += 1
-            if _check(p, content or "", exec_timeout):
+            base_ok = _check(p, content or "", exec_timeout)
+            if base_ok:
                 passed += 1
+                # Stability: the same completion re-executed twice. Code that
+                # depends on randomness, wall-clock or dict order passes once
+                # and fails later -- imprecise code wearing a passing score.
+                # Only re-runs items that passed, so the cost lands on
+                # successes, not on the whole battery.
+                if not _check(p, content or "", exec_timeout) or not _check(
+                        p, content or "", exec_timeout):
+                    flaky += 1
+            plus_src = p.get("test_plus") or plus_global
+            if plus_src:
+                n_plus += 1
+                if base_ok and _check(p, content or "", exec_timeout,
+                                      extra_src=plus_src):
+                    strict += 1
         n = len(items)
         score = passed / n
         ci_low, ci_high = _ci(score, n)
@@ -386,11 +407,16 @@ class OpenAICompatAdapter(SuiteAdapter):
             f"pass@1 {coverage}, max_tokens {mt}, seed "
             f"{seed}, {exec_timeout}s/case exec watchdog. Scored on the public "
             f"answer field only (reasoning is never executed as code). "
-            f"UNVERIFIED endpoint "
+            f"Passing solutions re-executed twice for stability (flaky "
+            f"bucket). "
+            + (f"Plus asserts on {n_plus}/{n} items "
+               f"(pass_at_1_plus over those)." if n_plus else
+               "No plus asserts supplied (pass_at_1_plus not emitted).")
+            + f" UNVERIFIED endpoint "
             f"identity (model name self-reported by server, not a weight "
             f"hash) — never compare with weighed-in records."
         )
-        return [
+        recs = [
             self._record(
                 identity=identity,
                 task="humaneval",
@@ -434,7 +460,36 @@ class OpenAICompatAdapter(SuiteAdapter):
                 base=base,
                 runtime=runtime,
             ),
+            self._record(
+                identity=identity,
+                task="humaneval",
+                metric="flaky",
+                value=flaky / n,
+                n=n,
+                ci_low=None,
+                ci_high=None,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+                runtime=runtime,
+            ),
         ]
+        if n_plus:
+            ci_s, ch_s = _ci(strict / n_plus, n_plus)
+            recs.append(self._record(
+                identity=identity,
+                task="humaneval",
+                metric="pass_at_1_plus",
+                value=strict / n_plus,
+                n=n_plus,
+                ci_low=ci_s,
+                ci_high=ch_s,
+                protocol=protocol,
+                seed=seed,
+                base=base,
+                runtime=runtime,
+            ))
+        return recs
 
     def _run_determinism(
         self, client: "_Client", served: str, base: str, identity: str,
@@ -1093,49 +1148,101 @@ class OpenAICompatAdapter(SuiteAdapter):
         steps = int(config.get("steps", d["steps"]))
         budget = int(config.get("max_tool_calls", d["max_tool_calls"]))
         seed = int(config.get("seed", _SEED))
-        if ms <= 0 or steps < 1:
-            raise ValueError("openai_compat: tool_use needs max_samples>0 and steps>=1")
+        distractors = bool(config.get("distractors", d["distractors"]))
+        error_rate = float(config.get("tool_error_rate", d["tool_error_rate"]))
+        if ms <= 0 or steps < 1 or budget < 1:
+            raise ValueError(
+                "openai_compat: tool_use needs max_samples>0, steps>=1 and "
+                "max_tool_calls>=1")
+        if not 0.0 <= error_rate <= 1.0:
+            raise ValueError(
+                "openai_compat: tool_error_rate must be within [0, 1]; "
+                f"got {error_rate}")
+        toolbox = ["calc"] + (["estimate"] if distractors else [])
+        schemas = [local_bench.TOOL_SCHEMAS[t] for t in toolbox]
+        # Seeded per run: the same seed injects errors on the same calls,
+        # so a recovery comparison between models is apples-to-apples.
+        err_rng = random.Random(f"toolerr-{seed}")
 
         solved = 0
         calls_total = 0
-        no_terminate = 0
+        no_tool = 0
+        wrong_tool = 0
+        with_errors = 0
+        recovered = 0
         for i in range(ms):
-            prompt, _terms, gold = local_bench.build_task(seed + i, steps)
+            prompt, _terms, gold = local_bench.build_task(
+                seed + i, steps, tools=toolbox)
             msgs: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
             calls = 0
+            used_tool = False
+            wrong_item = False
+            errors = 0
             text = ""
             for _ in range(budget):
-                turn = client.chat_tools(msgs, local_bench.CALC_SCHEMA, mt)
-                calls += 1
+                turn = client.chat_tools(msgs, schemas, mt)
                 text = turn.get("content") or ""
                 tcs = turn.get("tool_calls") or []
                 if not tcs:
                     break
+                # Count issued tool calls, not model turns: the final
+                # text-only turn is termination, not tool use, and a model
+                # that never calls at all must read as no_tool_call=1.
+                used_tool = True
+                calls += len(tcs)
                 msgs.append({"role": "assistant", "content": text or None,
                             "tool_calls": tcs})
                 for tc in tcs:
                     fn = (tc.get("function") or {})
+                    name = fn.get("name")
                     expr = _json_arg(fn.get("arguments"), "expr")
-                    obs = local_bench.run_calc(expr if isinstance(expr, str) else "")
+                    runner = (local_bench.TOOL_RUNNERS.get(name)
+                              if name in toolbox else None)
+                    if runner is None:
+                        if name != "calc":
+                            wrong_item = True
+                        obs: Any = (
+                            f"error: unknown tool {name!r}; "
+                            f"available: {', '.join(toolbox)}")
+                    else:
+                        if name != "calc":
+                            # A distractor call: legal JSON, wrong instrument.
+                            # Its observation is usable but never exact.
+                            wrong_item = True
+                        obs = runner(expr if isinstance(expr, str) else "")
+                        if (not isinstance(obs, str)
+                                and err_rng.random() < error_rate):
+                            obs = ("error: transient backend fault; "
+                                   "retry the call")
+                            errors += 1
                     msgs.append({"role": "tool", "tool_call_id": tc.get("id"),
                                 "content": str(obs)})
             calls_total += calls
-            if calls == 0:
-                no_terminate += 1
+            if not used_tool:
+                no_tool += 1
+            if wrong_item:
+                wrong_tool += 1
             pred = local_bench.predict_math(text)
-            if pred is not None and abs(pred - gold) <= 1e-6:
+            ok = pred is not None and abs(pred - gold) <= 1e-6
+            if ok:
                 solved += 1
+            if errors:
+                with_errors += 1
+                if ok:
+                    recovered += 1
         rate = solved / ms
         protocol = (
             f"openai_compat tool_use via {base} model {served}: {steps}-step "
-            f"arithmetic chains driven through a calc tool, {ms} items, gold "
-            f"COMPUTED from the chain (not authored), seed {seed} reproduces "
-            f"items, tool-call budget {budget}/item, temperature 0. Measures "
-            f"multi-step tool driving and termination, not arithmetic. "
-            f"CONSTRUCTED task -- no published agentic corpus was available; "
-            f"treat as indicative, not as a named benchmark. UNVERIFIED "
-            f"endpoint identity (model name self-reported by server, not a "
-            f"weight hash) -- never compare with weighed-in records."
+            f"arithmetic chains driven through {','.join(toolbox)}, {ms} "
+            f"items, gold COMPUTED from the chain (not authored), seed "
+            f"{seed} reproduces items, tool-call budget {budget}/item, "
+            f"transient-error rate {error_rate} (seeded), temperature 0. "
+            f"Measures multi-step tool driving, tool selection and "
+            f"termination, not arithmetic. CONSTRUCTED task -- no published "
+            f"agentic corpus was available; treat as indicative, not as a "
+            f"named benchmark. UNVERIFIED endpoint identity (model name "
+            f"self-reported by server, not a weight hash) -- never compare "
+            f"with weighed-in records."
         )
         recs = [self._record(
             identity=identity, task="tool_use", metric="solved",
@@ -1148,8 +1255,24 @@ class OpenAICompatAdapter(SuiteAdapter):
             protocol=protocol, seed=seed, base=base, runtime=runtime))
         recs.append(self._record(
             identity=identity, task="tool_use", metric="no_tool_call",
-            value=no_terminate / ms, n=ms, ci_low=None, ci_high=None,
+            value=no_tool / ms, n=ms, ci_low=None, ci_high=None,
             protocol=protocol, seed=seed, base=base, runtime=runtime))
+        recs.append(self._record(
+            identity=identity, task="tool_use", metric="wrong_tool",
+            value=wrong_tool / ms, n=ms, ci_low=None, ci_high=None,
+            protocol=(protocol + ". wrong_tool: fraction of items issuing "
+                      "at least one call to a non-calc tool (distractor or "
+                      "unknown name); its observation is never exact."),
+            seed=seed, base=base, runtime=runtime))
+        if with_errors:
+            recs.append(self._record(
+                identity=identity, task="tool_use", metric="recovered",
+                value=recovered / with_errors, n=with_errors,
+                ci_low=None, ci_high=None,
+                protocol=(protocol + f". recovered {recovered}/{with_errors}"
+                          f": items hit by an injected transient error that "
+                          f"still solved -- error recovery, not luck."),
+                seed=seed, base=base, runtime=runtime))
         return recs
 
     def _record(self, *, identity: str, task: str, metric: str, value: float,
@@ -1627,8 +1750,16 @@ def _extract_code(gen_code: str) -> str:
     return "\n".join(lines)
 
 
-def _check(problem: dict, gen_code: str, exec_timeout: int) -> bool:
+def _check(problem: dict, gen_code: str, exec_timeout: int,
+           extra_src: str = "") -> bool:
     """Execute the generated completion against the problem's tests.
+
+    ``extra_src`` is appended after ``problem["test"]`` and runs in the same
+    process: per-item ``test_plus`` asserts or a caller-supplied strict suite
+    (EvalPlus-style edge asserts against the entry point). A solution that
+    passes the base tests but fails the extra asserts is near-miss code --
+    exactly what aggressive quantization produces -- so the strict verdict
+    is reported as its own metric, never folded into pass@1.
 
     Runs in a *subprocess*, for two reasons that are both load-bearing:
 
@@ -1656,7 +1787,8 @@ def _check(problem: dict, gen_code: str, exec_timeout: int) -> bool:
         body = body.split("\n", 1)[1] if "\n" in body else ""
     while body.startswith("def "):
         body = "\n".join(body.split("\n")[1:]).lstrip("\n")
-    full = problem["prompt"] + "\n" + body + "\n" + problem["test"] + "\n"
+    full = (problem["prompt"] + "\n" + body + "\n" + problem["test"] + "\n"
+            + (extra_src or "") + "\n")
     child = (
         "import signal, sys\n"
         "class _TO(Exception): pass\n"

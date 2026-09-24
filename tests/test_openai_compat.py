@@ -85,12 +85,13 @@ class _Stub(BaseHTTPRequestHandler):
         prompt = req.get("messages", [{}])[-1].get("content", "")
         type(self).completions_seen.append(prompt)
         if req.get("tools") and type(self).tool_script is not None:
-            # scripted agentic turn: emit queued tool calls, then the answer
+            # scripted agentic turn: emit queued tool calls, then the answer.
+            # A step may name its tool (default calc) to script distractor use.
             step = type(self).tool_script.pop(0) if type(self).tool_script else None
             if isinstance(step, dict) and step.get("expr"):
                 call = {"id": f"c{len(type(self).completions_seen)}",
                        "type": "function",
-                       "function": {"name": "calc",
+                       "function": {"name": step.get("tool", "calc"),
                                    "arguments": json.dumps({"expr": step["expr"]})}}
                 self._json({"choices": [{"message": {"content": None,
                                                     "tool_calls": [call]}}]})
@@ -228,11 +229,14 @@ def test_humaneval_inline_items(endpoint):
         endpoint, "humaneval",
         {"model": "stub-model", "humaneval_items": HUMANEVAL_ITEMS},
     )
-    # pass_at_1 plus the truncation/empty buckets: a model that never emits
-    # code and one that is merely capped must not look alike in the headline.
+    # pass_at_1 plus the truncation/empty/stability buckets: a model that
+    # never emits code, one that is merely capped, and one whose code is
+    # nondeterministic must not look alike in the headline.
     assert [r["metric"] for r in records] == [
-        "pass_at_1", "budget_starved", "no_code"
+        "pass_at_1", "budget_starved", "no_code", "flaky"
     ]
+    by = {r["metric"]: r for r in records}
+    assert by["flaky"]["value"] == 0.0  # deterministic stub code is stable
     r = records[0]
     assert r["metric"] == "pass_at_1"
     assert r["value"] == 1.0 and r["n"] == 2
@@ -241,6 +245,47 @@ def test_humaneval_inline_items(endpoint):
     for extra in records[1:]:
         assert extra["n"] == 2 and extra["value"] == 0.0
         assert extra["ci_low"] is None and extra["ci_high"] is None
+
+
+def test_humaneval_plus_asserts_catch_near_miss(endpoint):
+    """A solution passing the base tests but failing extra asserts is
+    near-miss code: pass@1 stays 1.0, pass_at_1_plus drops, and the two
+    numbers must not be folded together."""
+    items = [
+        {"prompt": "def add(a, b):\n    \"\"\"Add.\"\"\"\n", "entry_point": "add",
+         "test": "def check(f):\n    assert f(1, 2) == 3\n",
+         "test_plus": "assert add(0, 0) == 0\nassert add(-1, 1) == 0\n"},
+        {"prompt": "def sub(a, b):\n    \"\"\"Subtract.\"\"\"\n", "entry_point": "sub",
+         "test": "def check(f):\n    assert f(5, 3) == 2\n",
+         "test_plus": "assert sub(0, 5) == -5\nassert sub(1, 1) == 999\n"},
+    ]
+    records = _adapter().run(
+        endpoint, "humaneval",
+        {"model": "stub-model", "humaneval_items": items})
+    by = {r["metric"]: r for r in records}
+    assert by["pass_at_1"]["value"] == 1.0
+    assert by["pass_at_1_plus"]["value"] == 0.5
+    assert by["pass_at_1_plus"]["n"] == 2
+    assert "Plus asserts on 2/2" in by["pass_at_1"]["protocol"]
+
+
+def test_humaneval_flaky_code_is_flagged(endpoint, monkeypatch):
+    """Code passing once but failing a re-execution is imprecise code
+    wearing a passing score: pass@1 stays, flaky reports it."""
+    calls = {"n": 0}
+
+    def fake(problem, gen_code, timeout, extra_src=""):
+        calls["n"] += 1
+        return calls["n"] != 2  # only the first confirmatory re-run fails
+
+    monkeypatch.setattr("adapters.openai_compat._check", fake)
+    records = _adapter().run(
+        endpoint, "humaneval",
+        {"model": "stub-model", "humaneval_items": HUMANEVAL_ITEMS})
+    by = {r["metric"]: r for r in records}
+    # item 1: pass, confirmatory fail -> flaky. item 2: pass, pass, pass.
+    assert by["pass_at_1"]["value"] == 1.0
+    assert by["flaky"]["value"] == 0.5
 
 
 def test_default_model_comes_from_the_server(endpoint):
@@ -837,10 +882,68 @@ def test_tool_use_drives_a_real_tool_loop(endpoint):
         {"model": "stub-model", "max_samples": 1, "steps": 2, "seed": 1,
          "max_tokens": 64})
     by = {r["metric"]: r for r in records}
-    assert set(by) == {"solved", "tool_calls_per_item", "no_tool_call"}
+    assert set(by) == {"solved", "tool_calls_per_item", "no_tool_call",
+                       "wrong_tool"}
     assert by["solved"]["value"] == 1.0
     assert by["no_tool_call"]["value"] == 0.0        # it did use the tool
+    assert by["wrong_tool"]["value"] == 0.0         # ... the right one
     assert by["tool_calls_per_item"]["value"] >= 2   # at least one call per step
+
+
+def test_tool_use_counts_a_model_that_never_calls(endpoint):
+    """The mirror path: a model that answers in text without ever issuing a
+    tool call must read as no_tool_call=1 with zero calls counted -- not as
+    0.0 with the final text turn tallied as tool use."""
+    _Stub.tool_script = []  # scripted branch, but no calls ever queued
+    records = _adapter().run(
+        endpoint, "tool_use",
+        {"model": "stub-model", "max_samples": 2, "steps": 2, "seed": 1,
+         "max_tokens": 64})
+    by = {r["metric"]: r for r in records}
+    assert set(by) == {"solved", "tool_calls_per_item", "no_tool_call",
+                       "wrong_tool"}
+    assert by["solved"]["value"] == 0.0
+    assert by["no_tool_call"]["value"] == 1.0
+    assert by["wrong_tool"]["value"] == 0.0
+    assert by["tool_calls_per_item"]["value"] == 0.0
+
+
+def test_tool_use_distractor_use_is_counted(endpoint):
+    """Calling the estimate distractor is legal JSON but the wrong
+    instrument: the item reads wrong_tool=1 even though a tool was used."""
+    _Stub.tool_script = [{"tool": "estimate", "expr": "1+1"},
+                         {"final": "whatever"}]
+    try:
+        records = _adapter().run(
+            endpoint, "tool_use",
+            {"model": "stub-model", "max_samples": 1, "steps": 1, "seed": 1,
+             "max_tokens": 64})
+    finally:
+        _Stub.tool_script = None
+    by = {r["metric"]: r for r in records}
+    assert by["no_tool_call"]["value"] == 0.0   # a tool WAS used
+    assert by["wrong_tool"]["value"] == 1.0     # ... the wrong one
+    assert by["tool_calls_per_item"]["value"] == 1.0
+
+
+def test_tool_use_error_recovery(endpoint):
+    """Injected transient errors must be visible as recovery signal: with
+    every observation faulted, a model that still terminates on the
+    computed gold reads solved=1 and recovered=1."""
+    _p, _t, gold = local_bench.build_task(1, 2)
+    _Stub.tool_script = [{"expr": "1+1"}, {"expr": "2*2"},
+                         {"final": f"#### {gold}"}]
+    try:
+        records = _adapter().run(
+            endpoint, "tool_use",
+            {"model": "stub-model", "max_samples": 1, "steps": 2, "seed": 1,
+             "max_tokens": 64, "tool_error_rate": 1.0})
+    finally:
+        _Stub.tool_script = None
+    by = {r["metric"]: r for r in records}
+    assert by["solved"]["value"] == 1.0
+    assert by["recovered"]["value"] == 1.0
+    assert by["recovered"]["n"] == 1
 
 
 def test_calc_tool_refuses_to_execute_anything_but_arithmetic(endpoint):

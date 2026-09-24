@@ -70,7 +70,7 @@ All four suites, tasks, and the `--config` keys they honor:
 | bdh_router_util | `adapters.bdh_router_util` | `router_utilization` | `repo`, `python`, `contexts`, `context_files`, `max_contexts`, `max_chars`, `block_size`, `mass_threshold`, `artifact_dir`, `seed`, `timeout` |
 | pi50 | `adapters.pi50` | `manifest_check`, `run_suite`, `score_refusal`, `score_confab`, `score_capability`, `paired_compare` | `repo`, `python`, `timeout`, `suites`, `arm`, `require_model`, `protocol`, `files`, `base_url` |
 | saga | `adapters.saga` | `mmlu`, `humaneval` | `repo`, `python`, `num_fewshot`, `max_samples`, `max_new_tokens`, `seed`, `timeout`, `exec_timeout`, `model_id`, `artifact_dir` |
-| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress`, `perturbation` | `model`, `api_key`, `timeout`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `perturbations`, `repeats` |
+| openai_compat | `adapters.openai_compat` | `mmlu`, `humaneval`, `determinism`, `capture_reference`, `likelihood_parity`, `length_stress`, `perturbation`, `gsm8k`, `simpleqa`, `tool_use` | `model`, `api_key`, `timeout`, `echo_max_tokens`, `max_tokens`, `max_samples`, `num_fewshot`, `subjects`, `subject_set` (`default`/`reasoning`/`knowledge`/`footprint`), `seed`, `exec_timeout`, `mmlu_items`, `humaneval_items`, `gsm8k_items`, `simpleqa_items`, `data_dir`, `datasets_server`, `datasets_cache`, `prompt`, `prompts`, `lengths`, `perturbations`, `repeats`, `steps`, `max_tool_calls`, `distractors`, `tool_error_rate`, `humaneval_test_plus`, `bundle_out`, `reference_bundle` |
 | null_model | `adapters.null_model` | `mmlu`, `humaneval` | `null_kind` (`stub`/`random`), `seed`, `mmlu_items`, `humaneval_items`, `exec_timeout` |
 | atlas | `adapters.atlas` | `diff` | `atlas_url`, `atlas_job`, `with_job`, `metric`, `top_n`, `min_change_pct`, `seed`, `timeout` |
 
@@ -286,6 +286,50 @@ else the raw completion); per-(item, perturbation) `:P<op>@p<sha>` steps
 plus `perturb_mean_jaccard` / `perturb_verdict_change_rate` aggregates
 with Wald CIs. Catches a model that learned the surface, not the task —
 no generation budget beyond one extra pass per item, no long completions).
+
+Three newer tasks close the footprint gaps: `gsm8k` (free-form GSM8K math
+from the vendored corpus — `####`-then-last-number extraction, `accuracy`
+over all items plus `answerable` / `budget_starved` buckets), `simpleqa`
+(short-form factuality by normalised containment — softer than exact
+match, read it as such), and `tool_use` (constructed multi-step
+`calc`-tool chains with seed-computed golds; metrics `solved`,
+`tool_calls_per_item`, `no_tool_call`). `tool_use` also offers an
+`estimate` distractor tool by default (`distractors: false` for calc
+only — the prompt warns it is never exact; `wrong_tool` reports items
+that called anything but `calc`) and seeded transient-error injection
+(`tool_error_rate` in [0, 1], default 0; `recovered` reports items hit
+by an injected error that still solved). `humaneval` accepts extra
+asserts via per-item `test_plus` or global `humaneval_test_plus`
+(EvalPlus-style edge asserts against the entry point; reported as
+`pass_at_1_plus` over the covered items, never folded into pass@1),
+and re-executes each passing solution twice (`flaky` flags
+randomness-dependent code). `mmlu` takes `subjects` explicitly
+or `subject_set` (`default` keeps the historical four subjects;
+`reasoning`, `knowledge`, `footprint` widen it). The local corpora live
+under `vendor/pi50_eval/data/` (`data_dir` overrides); a missing corpus
+raises instead of scoring 0.0. `tools/run_footprint.py` runs the pinned
+six-task footprint (determinism gate first, one job at a time) against an
+endpoint through the API — see its `--help` and module docstring for the
+pinned protocol.
+
+```bash
+# tool_use with tool selection + error recovery stressed
+python -m adapters.openai_compat http://host:8888/v1 tool_use \
+  --config '{"model": "my-served-model", "max_samples": 12, "steps": 6,
+             "distractors": true, "tool_error_rate": 0.2, "seed": 42}'
+# humaneval with caller-authored edge asserts (EvalPlus-style)
+python -m adapters.openai_compat http://host:8888/v1 humaneval \
+  --config '{"model": "my-served-model", "max_samples": 20,
+             "humaneval_test_plus": "assert add(0, 0) == 0"}'
+# footprint subset through the API (records land in the store)
+python tools/run_footprint.py --base-url http://127.0.0.1:8888/v1 \
+  --model my-served-model --only determinism tool_use --out fp.json
+```
+
+`--config` keys are validated loudly: unknown tasks, `steps < 1`,
+`tool_error_rate` outside [0, 1], and a missing determinism `prompt` all
+raise before any record is written — a misconfigured run fails, never
+scores 0.0 silently.
 
 ### atlas — weight diffs (`python -m adapters.atlas`)
 
